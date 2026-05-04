@@ -1,0 +1,285 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Plan {
+  FREE
+  PRO
+  BUSINESS
+}
+
+enum AuctionCategory {
+  VEICULO
+  IMOVEL
+}
+
+enum AuctionType {
+  JUDICIAL
+  EXTRAJUDICIAL
+  BANCARIO
+  SEGURADORA
+}
+
+enum AuctionStatus {
+  ACTIVE
+  ENDED
+  CANCELLED
+  SUSPENDED
+}
+
+enum NotificationType {
+  ALERT_MATCH
+  PRICE_DROP
+  AUCTION_ENDING
+  SYSTEM
+}
+
+enum NotificationChannel {
+  EMAIL
+  WHATSAPP
+  PUSH
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+  READ
+}
+
+enum BidStatus {
+  PENDING
+  REDIRECTED
+  WON
+  LOST
+}
+
+enum ScrapingStatus {
+  RUNNING
+  SUCCESS
+  PARTIAL
+  FAILED
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  TRIALING
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String
+  passwordHash  String?
+  phone         String?
+  avatarUrl     String?
+  plan          Plan      @default(FREE)
+  planExpiresAt DateTime?
+  googleId      String?   @unique
+  savedSearches SavedSearch[]
+  favorites     Favorite[]
+  notifications Notification[]
+  auctionViews  AuctionView[]
+  bidAttempts   BidAttempt[]
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@map("users")
+}
+
+model Auction {
+  id               String          @id @default(cuid())
+  sourceId         String
+  sourceName       String
+  sourceUrl        String
+  title            String
+  subtitle         String?
+  description      String?
+  category         AuctionCategory
+  auctionType      AuctionType
+  status           AuctionStatus   @default(ACTIVE)
+  price            Decimal         @db.Decimal(12, 2)
+  appraisedValue   Decimal?        @db.Decimal(12, 2)
+  marketValue      Decimal?        @db.Decimal(12, 2)
+  discountPct      Int?
+  opportunityScore Int?
+  incremento       Decimal?        @db.Decimal(12, 2)
+  address          String?
+  city             String
+  state            String          @db.Char(2)
+  zipCode          String?
+  lat              Decimal?        @db.Decimal(10, 7)
+  lng              Decimal?        @db.Decimal(10, 7)
+  auctionDate      DateTime?
+  endDate          DateTime?
+  publishedAt      DateTime?
+  processNumber    String?
+  court            String?
+  attrs            Json?
+  images           AuctionImage[]
+  favorites        Favorite[]
+  savedSearchMatches SavedSearchMatch[]
+  notifications    Notification[]
+  auctionViews     AuctionView[]
+  bidAttempts      BidAttempt[]
+  scrapedAt        DateTime        @default(now())
+  lastCheckedAt    DateTime        @default(now())
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  @@unique([sourceId, sourceName])
+  @@index([category])
+  @@index([state])
+  @@index([status])
+  @@index([price])
+  @@index([auctionDate])
+  @@index([discountPct])
+  @@map("auctions")
+}
+
+model AuctionImage {
+  id        String  @id @default(cuid())
+  auctionId String
+  url       String
+  order     Int     @default(0)
+  auction   Auction @relation(fields: [auctionId], references: [id], onDelete: Cascade)
+
+  @@map("auction_images")
+}
+
+model SavedSearch {
+  id               String    @id @default(cuid())
+  userId           String
+  name             String
+  alertEnabled     Boolean   @default(true)
+  notifyByEmail    Boolean   @default(true)
+  notifyByWhatsApp Boolean   @default(false)
+  filters          Json
+  lastTriggeredAt  DateTime?
+  matchCount       Int       @default(0)
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  matches          SavedSearchMatch[]
+  notifications    Notification[]
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("saved_searches")
+}
+
+model SavedSearchMatch {
+  id            String      @id @default(cuid())
+  savedSearchId String
+  auctionId     String
+  notified      Boolean     @default(false)
+  notifiedAt    DateTime?
+  savedSearch   SavedSearch @relation(fields: [savedSearchId], references: [id], onDelete: Cascade)
+  auction       Auction     @relation(fields: [auctionId], references: [id], onDelete: Cascade)
+  createdAt     DateTime    @default(now())
+
+  @@unique([savedSearchId, auctionId])
+  @@map("saved_search_matches")
+}
+
+model Favorite {
+  id        String   @id @default(cuid())
+  userId    String
+  auctionId String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  auction   Auction  @relation(fields: [auctionId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, auctionId])
+  @@index([userId])
+  @@map("favorites")
+}
+
+model Notification {
+  id            String              @id @default(cuid())
+  userId        String
+  savedSearchId String?
+  auctionId     String?
+  type          NotificationType
+  title         String
+  body          String
+  channel       NotificationChannel
+  status        NotificationStatus  @default(PENDING)
+  sentAt        DateTime?
+  readAt        DateTime?
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  savedSearch   SavedSearch? @relation(fields: [savedSearchId], references: [id])
+  auction       Auction?     @relation(fields: [auctionId], references: [id])
+  createdAt     DateTime     @default(now())
+
+  @@index([userId])
+  @@index([status])
+  @@map("notifications")
+}
+
+model AuctionView {
+  id        String   @id @default(cuid())
+  userId    String
+  auctionId String
+  viewedAt  DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  auction   Auction  @relation(fields: [auctionId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("auction_views")
+}
+
+model BidAttempt {
+  id        String    @id @default(cuid())
+  userId    String
+  auctionId String
+  value     Decimal   @db.Decimal(12, 2)
+  status    BidStatus @default(PENDING)
+  user      User      @relation(fields: [userId], references: [id])
+  auction   Auction   @relation(fields: [auctionId], references: [id])
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@map("bid_attempts")
+}
+
+model ScrapingLog {
+  id           String         @id @default(cuid())
+  sourceName   String
+  sourceUrl    String?
+  status       ScrapingStatus
+  startedAt    DateTime
+  finishedAt   DateTime?
+  totalFound   Int            @default(0)
+  totalNew     Int            @default(0)
+  totalUpdated Int            @default(0)
+  totalErrors  Int            @default(0)
+  errorDetails Json?
+  createdAt    DateTime       @default(now())
+
+  @@index([sourceName])
+  @@map("scraping_logs")
+}
+
+model Subscription {
+  id                 String             @id @default(cuid())
+  userId             String             @unique
+  plan               Plan
+  status             SubscriptionStatus
+  priceMonthly       Decimal            @db.Decimal(8, 2)
+  gatewayId          String?
+  gatewayCustomerId  String?
+  currentPeriodStart DateTime
+  currentPeriodEnd   DateTime
+  cancelledAt        DateTime?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  @@map("subscriptions")
+}
