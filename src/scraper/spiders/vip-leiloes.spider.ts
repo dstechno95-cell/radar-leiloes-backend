@@ -1,0 +1,139 @@
+import { Injectable, Logger } from '@nestjs/common'
+import { chromium } from 'playwright-core'
+import { AuctionCategory, AuctionStatus, AuctionType, Prisma } from '@prisma/client'
+
+const BASE_URL = 'https://www.vipleiloes.com.br'
+const LIST_URL = `${BASE_URL}/pesquisa/index?Filtro.TipoBem=1`  // tipo 1 = veículos
+
+@Injectable()
+export class VipLeiloesSpider {
+  private readonly logger = new Logger(VipLeiloesSpider.name)
+
+  async scrape(): Promise<Prisma.AuctionCreateInput[]> {
+    this.logger.log('🕷 VIP Leilões — iniciando scraping...')
+
+    const browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    })
+
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      locale: 'pt-BR',
+      timezoneId: 'America/Sao_Paulo',
+    })
+
+    const results: Prisma.AuctionCreateInput[] = []
+
+    try {
+      const page = await context.newPage()
+
+      // Bloqueia imagens e fontes para acelerar
+      await page.route('**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf}', r => r.abort())
+
+      await page.goto(LIST_URL, { waitUntil: 'networkidle', timeout: 30000 })
+      await page.waitForTimeout(2000)
+
+      // Pega todos os links de lotes
+      const lotLinks = await page.$$eval('a[href*="/lote/"]', els =>
+        [...new Set(els.map(el => (el as HTMLAnchorElement).href))]
+      )
+
+      this.logger.log(`Encontrados ${lotLinks.length} lotes`)
+
+      // Limita a 20 por ciclo para não sobrecarregar
+      const toScrape = lotLinks.slice(0, 20)
+
+      for (const url of toScrape) {
+        try {
+          const auction = await this.scrapeLote(context, url)
+          if (auction) results.push(auction)
+          await page.waitForTimeout(800) // delay entre requests
+        } catch (e) {
+          this.logger.warn(`Erro no lote ${url}: ${e}`)
+        }
+      }
+
+    } finally {
+      await browser.close()
+    }
+
+    this.logger.log(`✅ VIP Leilões: ${results.length} lotes extraídos`)
+    return results
+  }
+
+  private async scrapeLote(context: any, url: string): Promise<Prisma.AuctionCreateInput | null> {
+    const page = await context.newPage()
+    await page.route('**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf}', (r: any) => r.abort())
+
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 })
+      await page.waitForTimeout(1000)
+
+      // Extrai dados da página de detalhe
+      const data = await page.evaluate(() => {
+        const getText = (sel: string) =>
+          document.querySelector(sel)?.textContent?.trim() ?? ''
+        const getAttr = (sel: string, attr: string) =>
+          (document.querySelector(sel) as any)?.[attr]?.trim() ?? ''
+
+        return {
+          title:       getText('h1') || getText('.lote-titulo') || getText('.titulo-lote'),
+          price:       getText('.lance-atual') || getText('.valor-lance') || getText('[class*="lance"]'),
+          location:    getText('.localizacao') || getText('[class*="local"]') || getText('[class*="cidade"]'),
+          auctionDate: getText('[class*="data"]') || getText('.data-leilao'),
+          images:      Array.from(document.querySelectorAll('[class*="foto"] img, [class*="imagem"] img, .carousel img'))
+                         .map(img => (img as HTMLImageElement).src).filter(s => s && !s.includes('data:')).slice(0, 5),
+          description: getText('[class*="descricao"]') || getText('[class*="observ"]'),
+          edital:      getAttr('a[href*="edital"]', 'href'),
+        }
+      })
+
+      if (!data.title) return null
+
+      // Extrai ID do lote da URL
+      const sourceId = url.split('/lote/')[1]?.split('?')[0]?.split('/')[0] ?? url
+
+      // Parse do preço
+      const priceStr  = data.price.replace(/[^0-9,]/g, '').replace(',', '.')
+      const price     = parseFloat(priceStr) || 0
+
+      // Parse da cidade/estado
+      const locParts  = data.location.split(/[-/,]/)
+      const city      = locParts[0]?.trim() || 'Não informado'
+      const stateRaw  = locParts[locParts.length - 1]?.trim().toUpperCase() || 'SP'
+      const state     = stateRaw.length === 2 ? stateRaw : 'SP'
+
+      // Detecta tipo de leilão
+      const titleLower = data.title.toLowerCase()
+      const auctionType: AuctionType =
+        titleLower.includes('judicial') ? 'JUDICIAL' :
+        titleLower.includes('banco') || titleLower.includes('financeira') ? 'BANCARIO' :
+        'EXTRAJUDICIAL'
+
+      return {
+        sourceId,
+        sourceName: 'vip_leiloes',
+        sourceUrl:   url,
+        title:       data.title.slice(0, 200),
+        description: data.description || null,
+        category:    'VEICULO' as AuctionCategory,
+        auctionType,
+        status:      'ACTIVE' as AuctionStatus,
+        price:       price || 1000,
+        city,
+        state:       state.slice(0, 2),
+        attrs: {
+          origem: 'vip_leiloes',
+          imagens: data.images,
+          edital: data.edital,
+        },
+        scrapedAt:    new Date(),
+        lastCheckedAt: new Date(),
+      }
+
+    } finally {
+      await page.close()
+    }
+  }
+}
