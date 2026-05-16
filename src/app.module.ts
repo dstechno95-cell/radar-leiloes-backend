@@ -6,6 +6,7 @@ import { UsersModule } from './users/users.module'
 import { AuctionsModule } from './auctions/auctions.module'
 import { AlertsModule } from './alerts/alerts.module'
 import { ScraperModule } from './scraper/scraper.module'
+import { FipeModule } from './fipe/fipe.module'
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { ScraperModule } from './scraper/scraper.module'
     AuctionsModule,
     AlertsModule,
     ScraperModule,
+    FipeModule,
   ],
 })
 export class AppModule {}
