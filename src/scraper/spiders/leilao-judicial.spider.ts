@@ -23,14 +23,42 @@ export class LeilaoJudicialSpider {
   async scrape(): Promise<Prisma.AuctionCreateInput[]> {
     this.logger.log('🕷 Leilão Judicial — iniciando scraping...')
     const results: Prisma.AuctionCreateInput[] = []
+    const lotUrls = new Set<string>()
 
+    // Fase 1: coleta links de lotes de cada categoria
     for (const listUrl of LIST_URLS) {
       try {
-        const items = await this.scrapeListPage(listUrl)
-        results.push(...items)
-        await this.delay(1500)
+        const { data } = await axios.get(listUrl, { headers: HEADERS, timeout: 15000 })
+        const $ = cheerio.load(data)
+
+        $('a[href*="/lote/"]').each((_, el) => {
+          const href = $(el).attr('href') ?? ''
+          if (!href) return
+          const url = href.startsWith('http') ? href : `${BASE_URL}${href}`
+          lotUrls.add(url)
+        })
+
+        this.logger.log(`${listUrl}: ${lotUrls.size} links encontrados`)
+        await this.delay(1200)
       } catch (e) {
-        this.logger.warn(`Erro ao scraping ${listUrl}: ${String(e)}`)
+        this.logger.warn(`Erro ao listar ${listUrl}: ${String(e)}`)
+      }
+    }
+
+    if (lotUrls.size === 0) {
+      this.logger.warn('Nenhum link de lote encontrado — site pode ter bloqueado a requisição')
+      return []
+    }
+
+    // Fase 2: scraping de cada lote (limite de 40)
+    const toScrape = [...lotUrls].slice(0, 40)
+    for (const url of toScrape) {
+      try {
+        const item = await this.scrapeLote(url)
+        if (item) results.push(item)
+        await this.delay(600)
+      } catch (e) {
+        this.logger.warn(`Erro no lote ${url}: ${String(e)}`)
       }
     }
 
@@ -38,57 +66,71 @@ export class LeilaoJudicialSpider {
     return results
   }
 
-  private async scrapeListPage(listUrl: string): Promise<Prisma.AuctionCreateInput[]> {
-    const { data } = await axios.get(listUrl, { headers: HEADERS, timeout: 15000 })
+  private async scrapeLote(url: string): Promise<Prisma.AuctionCreateInput | null> {
+    const { data } = await axios.get(url, { headers: HEADERS, timeout: 15000 })
     const $ = cheerio.load(data)
-    const results: Prisma.AuctionCreateInput[] = []
 
-    const cards = $(
-      '[class*="lot"], [class*="lote"], [class*="item"], [class*="card"], article, .produto'
-    ).toArray()
+    // Título: primeiro h1 ou h2 da página
+    const title = $('h1, h2').first().text().trim()
+    if (!title || title.length < 4) return null
 
-    for (const card of cards.slice(0, 40)) {
-      try {
-        const $card     = $(card)
-        const title     = $card.find('h1,h2,h3,h4,[class*="title"],[class*="titulo"],[class*="nome"]').first().text().trim()
-        const priceText = $card.find('[class*="lance"],[class*="valor"],[class*="preco"],[class*="avaliacao"]').first().text().trim()
-        const location  = $card.find('[class*="local"],[class*="cidade"],[class*="estado"],[class*="comarca"]').first().text().trim()
-        const href      = $card.find('a').first().attr('href') ?? ''
-        const imgSrc    = $card.find('img').first().attr('src') ?? ''
-        const processText = $card.find('[class*="processo"],[class*="processo"]').first().text().trim()
+    // Preços: textos próximos a "Lance mínimo", "Avaliação", "Lance Atual"
+    const priceText = this.findTextAfterLabel($, ['Lance mínimo', 'Lance Atual', 'Avaliação', 'Valor'])
+    const appraisalText = this.findTextAfterLabel($, ['Avaliação', 'Valor de avaliação'])
 
-        if (!title || title.length < 4) continue
+    // Localização
+    const location = this.findTextAfterLabel($, ['Comarca', 'Cidade', 'Estado', 'Local'])
+                  || $('[class*="local"], [class*="cidade"], [class*="comarca"]').first().text().trim()
 
-        const sourceUrl = href.startsWith('http') ? href : `${BASE_URL}${href}`
-        const sourceId  = href.split('/').filter(Boolean).pop() ?? Math.random().toString(36).slice(2)
-        const price     = this.parsePrice(priceText)
-        const { city, state } = this.parseLocation(location)
-        const category  = this.detectCategory(listUrl, title)
+    // Processo judicial
+    const processo = this.findTextAfterLabel($, ['Processo', 'Nº do Processo'])
 
-        results.push({
-          sourceId,
-          sourceName:  'leilao_judicial',
-          sourceUrl,
-          title:       title.slice(0, 200),
-          category,
-          auctionType: 'JUDICIAL' as AuctionType,
-          status:      'ACTIVE' as AuctionStatus,
-          price:       price || 5000,
-          city,
-          state,
-          attrs: {
-            origem:    'leilao_judicial',
-            imagens:   imgSrc ? [imgSrc] : [],
-            ...(processText && { processo: processText }),
-          },
-          scrapedAt:     new Date(),
-          lastCheckedAt: new Date(),
-        })
-      } catch {}
+    // Imagens
+    const images = $('img[src*="lote"], img[src*="foto"], img[src*="imagem"]')
+      .map((_, el) => $(el).attr('src') ?? '').get().filter(Boolean).slice(0, 5)
+
+    // Descrição
+    const desc = $('[class*="descricao"], [class*="observa"], p').first().text().trim()
+
+    const sourceId = url.split('/').filter(Boolean).slice(-2).join('-')
+    const price    = this.parsePrice(priceText)
+    const appraisedValue = this.parsePrice(appraisalText)
+    const { city, state } = this.parseLocation(location)
+    const category = this.detectCategory(url, title)
+
+    return {
+      sourceId,
+      sourceName:  'leilao_judicial',
+      sourceUrl:   url,
+      title:       title.slice(0, 200),
+      description: desc || null,
+      category,
+      auctionType: 'JUDICIAL' as AuctionType,
+      status:      'ACTIVE' as AuctionStatus,
+      price:       price || 5000,
+      appraisedValue: appraisedValue || undefined,
+      city,
+      state,
+      attrs: {
+        origem:    'leilao_judicial',
+        imagens:   images,
+        ...(processo && { processo }),
+      },
+      scrapedAt:     new Date(),
+      lastCheckedAt: new Date(),
     }
+  }
 
-    this.logger.log(`${listUrl}: ${results.length} itens`)
-    return results
+  // Procura texto imediatamente após um label conhecido
+  private findTextAfterLabel($: cheerio.CheerioAPI, labels: string[]): string {
+    for (const label of labels) {
+      const el = $(`*:contains("${label}")`).last()
+      if (el.length) {
+        const next = el.next().text().trim() || el.parent().next().text().trim()
+        if (next && next.length < 100) return next
+      }
+    }
+    return ''
   }
 
   private parsePrice(text: string): number {
