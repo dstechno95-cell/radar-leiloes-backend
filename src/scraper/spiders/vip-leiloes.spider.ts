@@ -13,16 +13,27 @@ export class VipLeiloesSpider {
     this.logger.log('🕷 VIP Leilões — iniciando scraping...')
 
     const browser = await chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-    })
+  headless: true,
+  args: [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-blink-features=AutomationControlled',
+    '--disable-infobars',
+    '--window-size=1920,1080',
+  ],
+})
 
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      locale: 'pt-BR',
-      timezoneId: 'America/Sao_Paulo',
-    })
-
+  userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  locale: 'pt-BR',
+  timezoneId: 'America/Sao_Paulo',
+  viewport: { width: 1920, height: 1080 },
+  extraHTTPHeaders: {
+    'Accept-Language': 'pt-BR,pt;q=0.9',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  },
+})
     const results: Prisma.AuctionCreateInput[] = []
 
     try {
@@ -31,7 +42,9 @@ export class VipLeiloesSpider {
       // Bloqueia imagens e fontes para acelerar
       await page.route('**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf}', r => r.abort())
 
-      await page.goto(LIST_URL, { waitUntil: 'networkidle', timeout: 30000 })
+      await page.goto(LIST_URL, { waitUntil: 'domcontentloaded', timeout: 45000 })
+      // Aguarda qualquer link de lote aparecer (JS pode demorar para renderizar)
+      await page.waitForSelector('a[href*="/lote/"]', { timeout: 15000 }).catch(() => {})
       await page.waitForTimeout(2000)
 
       // Pega todos os links de lotes
@@ -67,8 +80,8 @@ export class VipLeiloesSpider {
     await page.route('**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf}', (r: any) => r.abort())
 
     try {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 })
-      await page.waitForTimeout(1000)
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 })
+        await page.waitForTimeout(3000)
 
       // Extrai dados da página de detalhe
       const data = await page.evaluate(() => {
