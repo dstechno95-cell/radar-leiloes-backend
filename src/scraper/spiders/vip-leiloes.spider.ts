@@ -2,8 +2,12 @@ import { Injectable, Logger } from '@nestjs/common'
 import { chromium } from 'playwright-core'
 import { AuctionCategory, AuctionStatus, AuctionType, Prisma } from '@prisma/client'
 
-const BASE_URL = 'https://www.vipleiloes.com.br'
-const LIST_URL = `${BASE_URL}/pesquisa/index?Filtro.TipoBem=1`  // tipo 1 = veículos
+const BASE_URL  = 'https://www.vipleiloes.com.br'
+const LIST_URLS = [
+  `${BASE_URL}/pesquisa/index?Filtro.TipoBem=1`,   // veículos
+  `${BASE_URL}/pesquisa/index?Filtro.TipoBem=2`,   // imóveis
+  `${BASE_URL}/pesquisa/index`,                     // todos
+]
 
 @Injectable()
 export class VipLeiloesSpider {
@@ -13,60 +17,85 @@ export class VipLeiloesSpider {
     this.logger.log('🕷 VIP Leilões — iniciando scraping...')
 
     const browser = await chromium.launch({
-  headless: true,
-  args: [
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
-    '--disable-dev-shm-usage',
-    '--disable-blink-features=AutomationControlled',
-    '--disable-infobars',
-    '--window-size=1920,1080',
-  ],
-})
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-infobars',
+        '--window-size=1920,1080',
+      ],
+    })
 
     const context = await browser.newContext({
-  userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  locale: 'pt-BR',
-  timezoneId: 'America/Sao_Paulo',
-  viewport: { width: 1920, height: 1080 },
-  extraHTTPHeaders: {
-    'Accept-Language': 'pt-BR,pt;q=0.9',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  },
-})
-    const results: Prisma.AuctionCreateInput[] = []
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      locale: 'pt-BR',
+      timezoneId: 'America/Sao_Paulo',
+      viewport: { width: 1920, height: 1080 },
+      extraHTTPHeaders: {
+        'Accept-Language': 'pt-BR,pt;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+    })
+
+    const seenUrls = new Set<string>()
+    const lotLinks: string[] = []
 
     try {
       const page = await context.newPage()
-
-      // Bloqueia imagens e fontes para acelerar
       await page.route('**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf}', r => r.abort())
 
-      await page.goto(LIST_URL, { waitUntil: 'domcontentloaded', timeout: 45000 })
-      // Aguarda qualquer link de lote aparecer (JS pode demorar para renderizar)
-      await page.waitForSelector('a[href*="/lote/"]', { timeout: 15000 }).catch(() => {})
-      await page.waitForTimeout(2000)
+      for (const listUrl of LIST_URLS) {
+        try {
+          this.logger.log(`Navegando para: ${listUrl}`)
+          await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 45000 })
+          await page.waitForSelector('a[href*="/lote/"]', { timeout: 15000 }).catch(() => {})
+          await page.waitForTimeout(3000)
 
-      // Pega todos os links de lotes
-      const lotLinks = await page.$$eval('a[href*="/lote/"]', els =>
-        [...new Set(els.map(el => (el as HTMLAnchorElement).href))]
-      )
+          const pageTitle = await page.title()
+          const allLinks  = await page.$$eval('a', els => els.map(el => (el as HTMLAnchorElement).href))
+          const loteLinks = allLinks.filter(h => h.includes('/lote/'))
 
-      this.logger.log(`Encontrados ${lotLinks.length} lotes`)
+          this.logger.log(`[${listUrl}] título: "${pageTitle}" | total links: ${allLinks.length} | links /lote/: ${loteLinks.length}`)
 
-      // Limita a 20 por ciclo para não sobrecarregar
+          // Log sample links for debugging
+          if (allLinks.length > 0) {
+            this.logger.log(`[${listUrl}] amostra de links: ${allLinks.slice(0, 5).join(' | ')}`)
+          }
+
+          for (const link of loteLinks) {
+            if (!seenUrls.has(link)) {
+              seenUrls.add(link)
+              lotLinks.push(link)
+            }
+          }
+        } catch (e) {
+          this.logger.warn(`Erro ao navegar ${listUrl}: ${String(e)}`)
+        }
+      }
+
+      await page.close()
+    } catch (e) {
+      this.logger.error(`Erro geral: ${String(e)}`)
+    }
+
+    this.logger.log(`Total de lotes únicos encontrados: ${lotLinks.length}`)
+
+    const results: Prisma.AuctionCreateInput[] = []
+
+    try {
       const toScrape = lotLinks.slice(0, 20)
 
       for (const url of toScrape) {
         try {
           const auction = await this.scrapeLote(context, url)
           if (auction) results.push(auction)
-          await page.waitForTimeout(800) // delay entre requests
+          await new Promise(r => setTimeout(r, 800))
         } catch (e) {
-          this.logger.warn(`Erro no lote ${url}: ${e}`)
+          this.logger.warn(`Erro no lote ${url}: ${String(e)}`)
         }
       }
-
     } finally {
       await browser.close()
     }
@@ -80,10 +109,9 @@ export class VipLeiloesSpider {
     await page.route('**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf}', (r: any) => r.abort())
 
     try {
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 })
-        await page.waitForTimeout(3000)
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 })
+      await page.waitForTimeout(3000)
 
-      // Extrai dados da página de detalhe
       const data = await page.evaluate(() => {
         const getText = (sel: string) =>
           document.querySelector(sel)?.textContent?.trim() ?? ''
@@ -104,20 +132,16 @@ export class VipLeiloesSpider {
 
       if (!data.title) return null
 
-      // Extrai ID do lote da URL
       const sourceId = url.split('/lote/')[1]?.split('?')[0]?.split('/')[0] ?? url
 
-      // Parse do preço
       const priceStr  = data.price.replace(/[^0-9,]/g, '').replace(',', '.')
       const price     = parseFloat(priceStr) || 0
 
-      // Parse da cidade/estado
       const locParts  = data.location.split(/[-/,]/)
       const city      = locParts[0]?.trim() || 'Não informado'
       const stateRaw  = locParts[locParts.length - 1]?.trim().toUpperCase() || 'SP'
       const state     = stateRaw.length === 2 ? stateRaw : 'SP'
 
-      // Detecta tipo de leilão
       const titleLower = data.title.toLowerCase()
       const auctionType: AuctionType =
         titleLower.includes('judicial') ? 'JUDICIAL' :
