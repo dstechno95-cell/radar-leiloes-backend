@@ -15,13 +15,15 @@ RUN npm install -g pnpm
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+# --ignore-scripts evita bloqueio do pnpm 9 para build scripts de terceiros
+RUN pnpm install --frozen-lockfile --ignore-scripts
 
 # Instala Chromium em caminho fixo para o runtime encontrar
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers
 RUN npx playwright install chromium
 
 COPY . .
+# Gera o Prisma client explicitamente após copiar o schema
 RUN npx prisma generate
 RUN pnpm run build
 
