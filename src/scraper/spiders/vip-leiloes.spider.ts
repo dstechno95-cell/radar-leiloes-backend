@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common'
-import axios from 'axios'
+import axios, { AxiosRequestConfig } from 'axios'
 import * as cheerio from 'cheerio'
+import * as https from 'https'
 import { AuctionCategory, AuctionStatus, AuctionType, Prisma } from '@prisma/client'
 
 const BASE_URL = 'https://www.vipleiloes.com.br'
@@ -9,8 +10,21 @@ const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
   'Accept-Language': 'pt-BR,pt;q=0.9',
-  'X-Requested-With': 'XMLHttpRequest',
   'Referer': `${BASE_URL}/pesquisa/index`,
+}
+
+function scraperConfig(): Partial<AxiosRequestConfig> {
+  const key = process.env.SCRAPER_API_KEY
+  if (!key) return {}
+  return {
+    proxy: {
+      host: 'proxy-server.scraperapi.com',
+      port: 8001,
+      auth: { username: 'scraperapi', password: key },
+    },
+    // ScraperAPI usa certificado próprio no proxy
+    httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+  }
 }
 
 @Injectable()
@@ -18,19 +32,20 @@ export class VipLeiloesSpider {
   private readonly logger = new Logger(VipLeiloesSpider.name)
 
   async scrape(): Promise<Prisma.AuctionCreateInput[]> {
-    this.logger.log('🕷 VIP Leilões — iniciando scraping (HTTP)...')
+    const usingProxy = !!process.env.SCRAPER_API_KEY
+    this.logger.log(`🕷 VIP Leilões — iniciando scraping (proxy: ${usingProxy})...`)
 
     // 1. Pega o CSRF token da página inicial
     const initRes = await axios.get(`${BASE_URL}/pesquisa/index`, {
-      headers: { ...HEADERS, 'X-Requested-With': undefined },
+      headers: { ...HEADERS },
       maxRedirects: 10,
       timeout: 30000,
+      ...scraperConfig(),
     })
 
-    const $init = cheerio.load(initRes.data as string)
+    const $init     = cheerio.load(initRes.data as string)
     const csrfToken = $init('input[name="__RequestVerificationToken"]').val() as string
-    // Extrai apenas name=value de cada cookie (sem atributos HttpOnly/SameSite)
-    const cookies = ((initRes.headers['set-cookie'] as string[] | undefined) ?? [])
+    const cookies   = ((initRes.headers['set-cookie'] as string[] | undefined) ?? [])
       .map((c: string) => c.split(';')[0])
       .join('; ')
 
@@ -57,20 +72,22 @@ export class VipLeiloesSpider {
         headers: {
           ...HEADERS,
           'Content-Type': 'application/x-www-form-urlencoded',
+          'X-Requested-With': 'XMLHttpRequest',
           'Cookie': cookies,
         },
         timeout: 30000,
         maxRedirects: 5,
+        ...scraperConfig(),
       },
     )
 
-    const $ = cheerio.load(listRes.data as string)
+    const $     = cheerio.load(listRes.data as string)
     const cards = $('.card-lel, .card-anuncio').toArray()
     this.logger.log(`Cards encontrados: ${cards.length}`)
 
     if (cards.length === 0) {
-      this.logger.warn('Nenhum card encontrado. Amostra do HTML:')
-      this.logger.warn((listRes.data as string).substring(0, 500))
+      this.logger.warn('Nenhum card — amostra HTML:')
+      this.logger.warn((listRes.data as string).substring(0, 300))
       return []
     }
 
@@ -78,35 +95,32 @@ export class VipLeiloesSpider {
 
     for (const card of cards.slice(0, 30)) {
       try {
-        const el     = $(card)
-        const href   = el.find('a.anc-body, a.crd-link, a[href*="/evento/anuncio/"]').first().attr('href') ?? ''
-        const slug   = href.split('/evento/anuncio/')[1]?.split('?')[0]?.split('/')[0]
+        const el    = $(card)
+        const href  = el.find('a[href*="/evento/anuncio/"]').first().attr('href') ?? ''
+        const slug  = href.split('/evento/anuncio/')[1]?.split('?')[0]?.split('/')[0]
         if (!slug) continue
 
-        const sourceId  = slug
-        const sourceUrl = `${BASE_URL}/evento/anuncio/${slug}`
-        const title     = el.find('.anc-title h1').text().trim() || el.find('h1').first().text().trim()
+        const title = el.find('.anc-title h1').text().trim() || el.find('h1').first().text().trim()
         if (!title) continue
 
-        const priceRaw  = el.find('.valor-atual').first().text().replace(/[^0-9,]/g, '').replace(',', '.')
-        const price     = parseFloat(priceRaw) || 1000
+        const priceRaw = el.find('.valor-atual').first().text().replace(/[^0-9,]/g, '').replace(',', '.')
+        const price    = parseFloat(priceRaw) || 1000
 
-        const localText = el.find('.anc-local').text()
-        const stateMatch = localText.match(/\b([A-Z]{2})\b/)
-        const state     = stateMatch?.[1] ?? 'SP'
+        const stateMatch = el.find('.anc-local').text().match(/\b([A-Z]{2})\b/)
+        const state      = stateMatch?.[1] ?? 'SP'
 
         const imgSrc = el.find('.crd-image img, img.card-img-top').first().attr('src') ?? ''
 
-        const titleLower    = title.toLowerCase()
+        const titleLower  = title.toLowerCase()
         const auctionType: AuctionType =
           titleLower.includes('judicial') ? 'JUDICIAL' :
           titleLower.includes('banco') || titleLower.includes('financeira') ? 'BANCARIO' :
           'EXTRAJUDICIAL'
 
         results.push({
-          sourceId,
+          sourceId:     slug,
           sourceName:   'vip_leiloes',
-          sourceUrl,
+          sourceUrl:    `${BASE_URL}/evento/anuncio/${slug}`,
           title:        title.slice(0, 200),
           description:  null,
           category:     'VEICULO' as AuctionCategory,
@@ -115,11 +129,8 @@ export class VipLeiloesSpider {
           price,
           city:         'Não informado',
           state:        state.slice(0, 2),
-          attrs: {
-            origem:  'vip_leiloes',
-            imagens: imgSrc ? [imgSrc] : [],
-          },
-          scrapedAt:     new Date(),
+          attrs:        { origem: 'vip_leiloes', imagens: imgSrc ? [imgSrc] : [] },
+          scrapedAt:    new Date(),
           lastCheckedAt: new Date(),
         })
       } catch (e) {
