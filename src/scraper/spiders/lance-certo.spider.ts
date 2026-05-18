@@ -31,22 +31,27 @@ export class LanceCertoSpider {
     const seen    = new Set<string>()
     const results: Prisma.AuctionCreateInput[] = []
 
-    for (const listUrl of LIST_URLS) {
-      try {
-        const res = await axios.get(scraperUrl(listUrl), {
-          timeout: 120000,
-          maxRedirects: 5,
-        })
+    // Busca as 3 URLs em paralelo
+    const pages = await Promise.allSettled(
+      LIST_URLS.map(url =>
+        axios.get(scraperUrl(url), { timeout: 60000, maxRedirects: 5 })
+          .then(r => ({ url, html: r.data as string }))
+      )
+    )
 
-        const $     = cheerio.load(res.data as string)
-        const cards = $('.listagem-leilao').toArray().filter(el =>
-          // Ignora o item de teste (display:none)
-          !$(el).attr('style')?.includes('display:none')
-        )
+    for (const page of pages) {
+      if (page.status === 'rejected') {
+        this.logger.warn(`Erro ao buscar página: ${String(page.reason)}`)
+        continue
+      }
+      const { url: listUrl, html } = page.value
+      const $     = cheerio.load(html)
+      const cards = $('.listagem-leilao').toArray().filter(el =>
+        !$(el).attr('style')?.includes('display:none')
+      )
+      this.logger.log(`${listUrl}: ${cards.length} cards`)
 
-        this.logger.log(`${listUrl}: ${cards.length} cards`)
-
-        for (const card of cards.slice(0, 20)) {
+      for (const card of cards.slice(0, 20)) {
           try {
             const el   = $(card)
             const href = el.find('a[href*="/leilao/"]').first().attr('href') ?? ''
@@ -100,9 +105,6 @@ export class LanceCertoSpider {
             this.logger.warn(`Erro ao parsear card: ${String(e)}`)
           }
         }
-      } catch (e) {
-        this.logger.warn(`Erro em ${listUrl}: ${String(e)}`)
-      }
     }
 
     this.logger.log(`✅ Lance Certo: ${results.length} lotes extraídos`)
