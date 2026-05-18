@@ -90,8 +90,11 @@ export class ScraperService {
             await this.prisma.auction.update({
               where: { id: existing.id },
               data: {
+                title:         auction.title,
                 price:         auction.price,
                 status:        auction.status,
+                city:          auction.city,
+                state:         auction.state,
                 lastCheckedAt: new Date(),
                 ...(auction.attrs && { attrs: auction.attrs }),
                 ...(auction.description && { description: auction.description }),
