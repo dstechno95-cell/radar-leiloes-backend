@@ -46,16 +46,15 @@ export class ScraperService {
 
     try {
       const results = await Promise.allSettled([
-        this.runSpider('superbid',       () => this.superbidSpider.scrape()),
-        this.runSpider('megaleiloes',    () => this.megaleiloesSpider.scrape()),
-        this.runSpider('leilao_judicial',() => this.leilaoJudicialSpider.scrape()),
-        this.runSpider('vip_leiloes',    () => this.vipSpider.scrape()),
-        this.runSpider('lance_certo',    () => this.lanceCertoSpider.scrape()),
-        this.runSpider('leilo',          () => this.leiloSpider.scrape()),
+        this.runSpider('superbid',        () => this.superbidSpider.scrape()),
+        this.runSpider('leilao_judicial', () => this.leilaoJudicialSpider.scrape()),
+        this.runSpider('vip_leiloes',     () => this.vipSpider.scrape()),
+        this.runSpider('lance_certo',     () => this.lanceCertoSpider.scrape()),
+        this.runSpider('leilo',           () => this.leiloSpider.scrape()),
       ])
 
       const summary = results.map((r, i) => ({
-        spider: ['superbid', 'megaleiloes', 'leilao_judicial', 'vip_leiloes', 'lance_certo', 'leilo'][i],
+        spider: ['superbid', 'leilao_judicial', 'vip_leiloes', 'lance_certo', 'leilo'][i],
         ok:     r.status === 'fulfilled',
         data:   r.status === 'fulfilled' ? r.value : { error: String(r.reason) },
       }))

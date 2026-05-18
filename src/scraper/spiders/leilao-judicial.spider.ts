@@ -3,10 +3,15 @@ import axios from 'axios'
 import * as cheerio from 'cheerio'
 import { AuctionCategory, AuctionStatus, AuctionType, Prisma } from '@prisma/client'
 
-const BASE_URL    = 'https://www.leiloesjudiciais.com.br'
-const CATEGORIES  = ['veiculos']
-const MAX_PAGES   = 5   // 5 páginas × ~25 lotes = ~125 lotes por categoria
-const MAX_SCRAPE  = 150 // limite total de lotes para scraping por ciclo
+const BASE_URL = 'https://www.leiloesjudiciais.com.br'
+
+// Categorias de veículos com número máximo de páginas conhecido
+const CATEGORIES = [
+  { path: 'veiculos/carros',    maxPages: 12 },
+  { path: 'veiculos/motos',     maxPages: 7  },
+  { path: 'veiculos/caminhoes', maxPages: 4  },
+  { path: 'veiculos/onibus',    maxPages: 2  },
+]
 
 const HEADERS = {
   'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -20,206 +25,105 @@ export class LeilaoJudicialSpider {
   private readonly logger = new Logger(LeilaoJudicialSpider.name)
 
   async scrape(): Promise<Prisma.AuctionCreateInput[]> {
-    this.logger.log('🕷 Leilão Judicial — iniciando scraping...')
+    this.logger.log('🕷 Leilão Judicial — iniciando scraping direto das listagens...')
     const results: Prisma.AuctionCreateInput[] = []
-    // Mapeia URL do lote → categoria correta baseada na página de origem
-    const lotMap = new Map<string, AuctionCategory>()
+    const seen = new Set<string>()
 
-    // Fase 1: coleta links de lotes paginando cada categoria
-    for (const cat of CATEGORIES) {
-      const defaultCategory: AuctionCategory = cat === 'imoveis' ? 'IMOVEL' : 'VEICULO'
-
-      for (let page = 0; page < MAX_PAGES; page++) {
-        const listUrl = page === 0
-          ? `${BASE_URL}/${cat}`
-          : `${BASE_URL}/${cat}?pagina=${page}`
+    for (const { path, maxPages } of CATEGORIES) {
+      let found = 0
+      for (let page = 1; page <= maxPages; page++) {
+        const listUrl = page === 1
+          ? `${BASE_URL}/${path}`
+          : `${BASE_URL}/${path}?pagina=${page}`
         try {
           const { data } = await axios.get(listUrl, { headers: HEADERS, timeout: 15000 })
           const $ = cheerio.load(data)
 
-          const before = lotMap.size
-          $('a[href*="/lote/"]').each((_, el) => {
-            const href = $(el).attr('href') ?? ''
-            if (!href) return
-            const url = href.startsWith('http') ? href : `${BASE_URL}${href}`
-            if (!lotMap.has(url)) lotMap.set(url, defaultCategory)
-          })
+          const cards = $('a[href*="/lote/"]').toArray()
+          if (cards.length === 0) {
+            this.logger.log(`${path} p${page}: sem cards — encerrando`)
+            break
+          }
 
-          const added = lotMap.size - before
-          this.logger.log(`${listUrl}: +${added} links (total ${lotMap.size})`)
+          let added = 0
+          for (const card of cards) {
+            const $card = $(card)
+            const href  = $card.attr('href') ?? ''
+            // sourceId = "DEPOSIT_ID-LOT_NUMBER"
+            const parts   = href.replace('/lote/', '').split('/')
+            const sourceId = parts.join('-')
+            if (!sourceId || seen.has(sourceId)) continue
+            seen.add(sourceId)
 
-          if (added === 0 && page > 0) break
-          await this.delay(800)
+            const fullText = $card.text().replace(/\s+/g, ' ').trim()
+
+            // Título: linha com marca/modelo/ano (ex: "HONDA/NXR 160 BROS - 18/18")
+            const titleLine = fullText.split(/\n|\r|clique para/)
+              .map(s => s.trim())
+              .find(s => s.length > 5 && /[A-Z]{2,}/.test(s) && !/^(Aberto|Encerrado|Lance|Avaliação|Página|\d+$)/.test(s))
+            const title = titleLine ?? fullText.slice(0, 100)
+            if (!title || title.length < 4) continue
+
+            // Imagem S3
+            const imgSrc = $card.find('img').first().attr('src') ?? ''
+            const images = imgSrc && imgSrc.includes('s3') && !imgSrc.includes('nao-disponivel')
+              ? [imgSrc] : []
+
+            // Localização: padrão "Cidade/UF" ou "Cidade, UF"
+            const locMatch = fullText.match(/([A-Za-zÀ-ú\s]+)[\/,]\s*([A-Z]{2})\b/)
+            const city  = locMatch?.[1]?.trim() ?? 'Não informado'
+            const state = locMatch?.[2] ?? 'SP'
+
+            // Preço: "Lance mínimo R$ X" ou "Lance Atual R$ X"
+            const priceMatch = fullText.match(/Lance m[íi]nimo\s*R\$\s*([\d.,]+)/i)
+                            ?? fullText.match(/Lance Atual\s*R\$\s*([\d.,]+)/i)
+                            ?? fullText.match(/R\$\s*([\d.,]+)/)
+            const price = priceMatch
+              ? parseFloat(priceMatch[1].replace(/\./g, '').replace(',', '.'))
+              : 0
+
+            // Avaliação
+            const appraisalMatch = fullText.match(/Avalia[çc][aã]o\s*R\$\s*([\d.,]+)/i)
+            const appraisedValue = appraisalMatch
+              ? parseFloat(appraisalMatch[1].replace(/\./g, '').replace(',', '.'))
+              : undefined
+
+            results.push({
+              sourceId,
+              sourceName:     'leilao_judicial',
+              sourceUrl:      `${BASE_URL}${href}`,
+              title:          title.slice(0, 200),
+              description:    null,
+              category:       'VEICULO' as AuctionCategory,
+              auctionType:    'JUDICIAL' as AuctionType,
+              status:         'ACTIVE' as AuctionStatus,
+              price:          price || 5000,
+              appraisedValue: appraisedValue || undefined,
+              city,
+              state:          state.slice(0, 2),
+              attrs: {
+                origem:  'leilao_judicial',
+                imagens: images,
+              },
+              scrapedAt:     new Date(),
+              lastCheckedAt: new Date(),
+            })
+            added++
+          }
+
+          found += added
+          this.logger.log(`${path} p${page}: +${added} itens (total categoria: ${found})`)
+          if (added === 0 && page > 1) break
+          await this.delay(500)
         } catch (e) {
-          this.logger.warn(`Erro ao listar ${listUrl}: ${String(e)}`)
+          this.logger.warn(`Erro ${listUrl}: ${String(e)}`)
           break
         }
       }
     }
 
-    if (lotMap.size === 0) {
-      this.logger.warn('Nenhum link de lote encontrado — site pode ter bloqueado a requisição')
-      return []
-    }
-
-    // Fase 2: scraping de cada lote com categoria correta da origem
-    const toScrape = [...lotMap.entries()].slice(0, MAX_SCRAPE)
-    for (const [url, categoryFromList] of toScrape) {
-      try {
-        const item = await this.scrapeLote(url, categoryFromList)
-        if (item) results.push(item)
-        await this.delay(600)
-      } catch (e) {
-        this.logger.warn(`Erro no lote ${url}: ${String(e)}`)
-      }
-    }
-
     this.logger.log(`✅ Leilão Judicial: ${results.length} lotes extraídos`)
     return results
-  }
-
-  private async scrapeLote(url: string, categoryFromList: AuctionCategory = 'VEICULO'): Promise<Prisma.AuctionCreateInput | null> {
-    const { data } = await axios.get(url, { headers: HEADERS, timeout: 15000 })
-    const $ = cheerio.load(data)
-
-    // Título: primeiro h1 ou h2
-    const h1Title = $('h1, h2').first().text().trim()
-    if (!h1Title || h1Title.length < 4) return null
-
-    // Preços
-    const priceText    = this.findTextAfterLabel($, ['Lance mínimo', 'Lance Atual', 'Avaliação', 'Valor'])
-    const appraisalText = this.findTextAfterLabel($, ['Avaliação', 'Valor de avaliação'])
-
-    // Localização
-    const location = this.findTextAfterLabel($, ['Comarca', 'Cidade', 'Estado', 'Local'])
-                  || $('[class*="local"], [class*="cidade"], [class*="comarca"]').first().text().trim()
-
-    // Processo judicial
-    const processo = this.findTextAfterLabel($, ['Processo', 'Nº do Processo'])
-
-    // Imagens
-    const images = $('img[src*="lote"], img[src*="foto"], img[src*="imagem"]')
-      .map((_, el) => $(el).attr('src') ?? '').get().filter(Boolean).slice(0, 5)
-
-    // Descrição — pode conter o modelo do veículo quando h1 é título genérico do tribunal
-    const descEl  = $('[class*="descricao"], [class*="observa"], [class*="bem"], [class*="detalhe"], p')
-    const descText = descEl.map((_, el) => $(el).text().trim()).get().join(' ').replace(/\s+/g, ' ')
-
-    // Verifica veículo no h1 ou em qualquer texto relevante da página
-    const fullText = `${h1Title} ${descText}`.toLowerCase()
-    const category = this.refineCategory(categoryFromList, fullText)
-    if (category !== 'VEICULO') return null
-
-    // Usa h1 como título; se h1 for genérico (sem keyword), tenta linha da descrição com keyword
-    let title = h1Title
-    if (!this.VEHICLE_KW.some(k => h1Title.toLowerCase().includes(k))) {
-      const betterLine = descText.split(/[.\n]/).find(l =>
-        this.VEHICLE_KW.some(k => l.toLowerCase().includes(k))
-      )
-      if (betterLine) title = betterLine.trim().slice(0, 200)
-    }
-
-    const sourceId       = url.split('/').filter(Boolean).slice(-2).join('-')
-    const price          = this.parsePrice(priceText)
-    const appraisedValue = this.parsePrice(appraisalText)
-    const { city, state } = this.parseLocation(location)
-
-    return {
-      sourceId,
-      sourceName:  'leilao_judicial',
-      sourceUrl:   url,
-      title:       title.slice(0, 200),
-      description: descText.slice(0, 500) || null,
-      category,
-      auctionType: 'JUDICIAL' as AuctionType,
-      status:      'ACTIVE' as AuctionStatus,
-      price:       price || 5000,
-      appraisedValue: appraisedValue || undefined,
-      city,
-      state,
-      attrs: {
-        origem:    'leilao_judicial',
-        imagens:   images,
-        ...(processo && { processo }),
-      },
-      scrapedAt:     new Date(),
-      lastCheckedAt: new Date(),
-    }
-  }
-
-  // Procura texto imediatamente após um label conhecido
-  private findTextAfterLabel($: cheerio.CheerioAPI, labels: string[]): string {
-    for (const label of labels) {
-      const el = $(`*:contains("${label}")`).last()
-      if (el.length) {
-        const next = el.next().text().trim() || el.parent().next().text().trim()
-        if (next && next.length < 100) return next
-      }
-    }
-    return ''
-  }
-
-  private parsePrice(text: string): number {
-    if (!text) return 0
-    const clean = text.replace(/[^0-9,]/g, '').replace(',', '.')
-    return parseFloat(clean) || 0
-  }
-
-  private parseLocation(text: string): { city: string; state: string } {
-    if (!text) return { city: 'Não informado', state: 'SP' }
-    const parts = text.split(/[-/,\n]/).map(s => s.trim()).filter(Boolean)
-    const city  = parts[0] || 'Não informado'
-    const rawSt = parts[parts.length - 1]?.toUpperCase() || 'SP'
-    const state = rawSt.length === 2 && /^[A-Z]{2}$/.test(rawSt) ? rawSt : 'SP'
-    return { city, state }
-  }
-
-  private readonly VEHICLE_KW = [
-    // Marcas
-    'honda','toyota','ford','fiat','chevrolet','gm','vw','volkswagen','renault',
-    'hyundai','nissan','kia','jeep','bmw','audi','mercedes','volvo','peugeot',
-    'citroen','citroën','mitsubishi','yamaha','kawasaki','suzuki','ducati',
-    'triumph','harley','royal enfield','dafra','shineray','traxx',
-    // Tipos genéricos
-    'veículo','veiculo','automóvel','automovel','motocicleta','motocicletas',
-    'moto','motos','carro','carros','caminhão','caminhao','caminhões','caminhoes',
-    'pickup','suv','camionete','camionetes','ônibus','onibus','van','kombi',
-    'utilitário','utilitario','trator','reboque','semirreboque',
-    // Modelos populares
-    'gol','celta','corsa','palio','uno','siena','brava','marea','tempra',
-    'hilux','ranger','s10','frontier','amarok','l200','triton',
-    'duster','creta','hb20','onix','argo','kwid','sandero','logan',
-    'ecosport','fiesta','ka','focus','fusion','edge','bronco',
-    'civic','fit','city','hrv','crv','wrv','pilot',
-    'corolla','etios','yaris','sw4','hilux','rav4','land cruiser',
-    'compass','renegade','commander','toro','saveiro','strada','picape',
-    'kicks','sentra','frontier','versa','march',
-    'tucson','sportage','ceed','sorento','stinger',
-    'captur','kwid','master','duster','oroch',
-    'pulse','fastback','t-cross','tiguan','polo','virtus','nivus','taos',
-    'golf','passat','jetta','amarok','fox','up',
-    'astra','zafira','vectra','calibra','meriva','montana',
-    '208','308','2008','3008','partner',
-    'c3','c4','berlingo','jumper','jumpy',
-    'l300','pajero','outlander','lancer','eclipse',
-    'cb 300','cb 500','cb 600','cg 125','cg 150','cg 160','fan','titan',
-    'xre','nx','bros','pcx','biz','pop','lead',
-    'fazer','mt-07','mt-09','lander','crosser','factor','neo',
-    'dyna','bobber','v-strom','bandit','gsxr','gsx',
-    // Sinais de veículo judicial
-    'placa','renavam','chassi','gravame','penhora',
-    '20/20','21/21','22/22','23/23','24/24',
-    '/2015','/2016','/2017','/2018','/2019','/2020','/2021','/2022','/2023','/2024',
-  ]
-
-  // Aceita se título contiver palavra-chave de veículo OU padrão de ano de modelo
-  private refineCategory(base: AuctionCategory, title: string): AuctionCategory {
-    if (base === 'IMOVEL') return 'IMOVEL'
-    const t = title.toLowerCase()
-    if (this.VEHICLE_KW.some(k => t.includes(k))) return 'VEICULO'
-    // Padrão de ano modelo: "2018/2019", "2020/2021", "Ano 2019" etc.
-    if (/\b(19|20)\d{2}[/\s](19|20)\d{2}\b/.test(t)) return 'VEICULO'
-    return 'IMOVEL'
   }
 
   private delay(ms: number) {
