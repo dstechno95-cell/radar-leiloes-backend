@@ -50,4 +50,9 @@ export class ScraperController {
   runLeilaoJudicial() {
     return this.scraper.runSpider('leilao_judicial', () => this.leilaoJudicialSpider.scrape())
   }
+
+  @Post('cleanup')
+  cleanup() {
+    return this.scraper.cleanupPropertyRecords()
+  }
 }

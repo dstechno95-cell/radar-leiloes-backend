@@ -136,4 +136,27 @@ export class ScraperService {
   isRunning() {
     return this.running
   }
+
+  async cleanupPropertyRecords() {
+    const keywords = [
+      'fazenda','sítio','sitio','hectare','apartamento','apto',
+      'imóvel','imovel','terreno','galpão','galpao','sobrado',
+      'cobertura','chácara','chacara','rural','agricol',
+    ]
+    const orConditions = keywords.map(k => ({
+      title: { contains: k, mode: 'insensitive' as const },
+    }))
+
+    const deleted = await this.prisma.auction.deleteMany({
+      where: {
+        OR: [
+          { category: 'IMOVEL' },
+          ...orConditions,
+        ],
+      },
+    })
+
+    this.logger.log(`🧹 Cleanup: ${deleted.count} registros de imóveis deletados`)
+    return { deleted: deleted.count }
+  }
 }
