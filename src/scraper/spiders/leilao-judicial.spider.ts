@@ -3,11 +3,10 @@ import axios from 'axios'
 import * as cheerio from 'cheerio'
 import { AuctionCategory, AuctionStatus, AuctionType, Prisma } from '@prisma/client'
 
-const BASE_URL = 'https://www.leiloesjudiciais.com.br'
-const LIST_URLS = [
-  `${BASE_URL}/veiculos`,
-  `${BASE_URL}/imoveis`,
-]
+const BASE_URL    = 'https://www.leiloesjudiciais.com.br'
+const CATEGORIES  = ['veiculos', 'imoveis']
+const MAX_PAGES   = 5   // 5 páginas × ~25 lotes = ~125 lotes por categoria
+const MAX_SCRAPE  = 150 // limite total de lotes para scraping por ciclo
 
 const HEADERS = {
   'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -25,23 +24,34 @@ export class LeilaoJudicialSpider {
     const results: Prisma.AuctionCreateInput[] = []
     const lotUrls = new Set<string>()
 
-    // Fase 1: coleta links de lotes de cada categoria
-    for (const listUrl of LIST_URLS) {
-      try {
-        const { data } = await axios.get(listUrl, { headers: HEADERS, timeout: 15000 })
-        const $ = cheerio.load(data)
+    // Fase 1: coleta links de lotes paginando cada categoria
+    for (const cat of CATEGORIES) {
+      for (let page = 0; page < MAX_PAGES; page++) {
+        const listUrl = page === 0
+          ? `${BASE_URL}/${cat}`
+          : `${BASE_URL}/${cat}?pagina=${page}`
+        try {
+          const { data } = await axios.get(listUrl, { headers: HEADERS, timeout: 15000 })
+          const $ = cheerio.load(data)
 
-        $('a[href*="/lote/"]').each((_, el) => {
-          const href = $(el).attr('href') ?? ''
-          if (!href) return
-          const url = href.startsWith('http') ? href : `${BASE_URL}${href}`
-          lotUrls.add(url)
-        })
+          const before = lotUrls.size
+          $('a[href*="/lote/"]').each((_, el) => {
+            const href = $(el).attr('href') ?? ''
+            if (!href) return
+            const url = href.startsWith('http') ? href : `${BASE_URL}${href}`
+            lotUrls.add(url)
+          })
 
-        this.logger.log(`${listUrl}: ${lotUrls.size} links encontrados`)
-        await this.delay(1200)
-      } catch (e) {
-        this.logger.warn(`Erro ao listar ${listUrl}: ${String(e)}`)
+          const added = lotUrls.size - before
+          this.logger.log(`${listUrl}: +${added} links (total ${lotUrls.size})`)
+
+          // Se não adicionou nenhum novo, chegou no fim da paginação
+          if (added === 0 && page > 0) break
+          await this.delay(800)
+        } catch (e) {
+          this.logger.warn(`Erro ao listar ${listUrl}: ${String(e)}`)
+          break
+        }
       }
     }
 
@@ -50,8 +60,8 @@ export class LeilaoJudicialSpider {
       return []
     }
 
-    // Fase 2: scraping de cada lote (limite de 40)
-    const toScrape = [...lotUrls].slice(0, 40)
+    // Fase 2: scraping de cada lote
+    const toScrape = [...lotUrls].slice(0, MAX_SCRAPE)
     for (const url of toScrape) {
       try {
         const item = await this.scrapeLote(url)
