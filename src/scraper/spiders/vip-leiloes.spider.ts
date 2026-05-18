@@ -1,176 +1,131 @@
 import { Injectable, Logger } from '@nestjs/common'
-import { chromium } from 'playwright-core'
+import axios from 'axios'
+import * as cheerio from 'cheerio'
 import { AuctionCategory, AuctionStatus, AuctionType, Prisma } from '@prisma/client'
 
-const BASE_URL  = 'https://www.vipleiloes.com.br'
-const LIST_URLS = [
-  `${BASE_URL}/pesquisa/index?Filtro.TipoBem=1`,   // veículos
-  `${BASE_URL}/pesquisa/index?Filtro.TipoBem=2`,   // imóveis
-  `${BASE_URL}/pesquisa/index`,                     // todos
-]
+const BASE_URL = 'https://www.vipleiloes.com.br'
+
+const HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'pt-BR,pt;q=0.9',
+  'X-Requested-With': 'XMLHttpRequest',
+  'Referer': `${BASE_URL}/pesquisa/index`,
+}
 
 @Injectable()
 export class VipLeiloesSpider {
   private readonly logger = new Logger(VipLeiloesSpider.name)
 
   async scrape(): Promise<Prisma.AuctionCreateInput[]> {
-    this.logger.log('🕷 VIP Leilões — iniciando scraping...')
+    this.logger.log('🕷 VIP Leilões — iniciando scraping (HTTP)...')
 
-    const browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-infobars',
-        '--window-size=1920,1080',
-      ],
+    // 1. Pega o CSRF token da página inicial
+    const initRes = await axios.get(`${BASE_URL}/pesquisa/index`, {
+      headers: { ...HEADERS, 'X-Requested-With': undefined },
+      withCredentials: true,
+      maxRedirects: 5,
+      timeout: 30000,
     })
 
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      locale: 'pt-BR',
-      timezoneId: 'America/Sao_Paulo',
-      viewport: { width: 1920, height: 1080 },
-      extraHTTPHeaders: {
-        'Accept-Language': 'pt-BR,pt;q=0.9',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      },
-    })
+    const $init = cheerio.load(initRes.data as string)
+    const csrfToken = $init('input[name="__RequestVerificationToken"]').val() as string
+    const cookies   = (initRes.headers['set-cookie'] ?? []).join('; ')
 
-    const seenUrls = new Set<string>()
-    const lotLinks: string[] = []
-
-    try {
-      const page = await context.newPage()
-      await page.route('**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf}', r => r.abort())
-
-      for (const listUrl of LIST_URLS) {
-        try {
-          this.logger.log(`Navegando para: ${listUrl}`)
-          await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 45000 })
-          await page.waitForSelector('a[href*="/lote/"]', { timeout: 15000 }).catch(() => {})
-          await page.waitForTimeout(3000)
-
-          const pageTitle = await page.title()
-          const allLinks  = await page.$$eval('a', els => els.map(el => (el as HTMLAnchorElement).href))
-          const loteLinks = allLinks.filter(h => h.includes('/lote/'))
-
-          this.logger.log(`[${listUrl}] título: "${pageTitle}" | total links: ${allLinks.length} | links /lote/: ${loteLinks.length}`)
-
-          // Log sample links for debugging
-          if (allLinks.length > 0) {
-            this.logger.log(`[${listUrl}] amostra de links: ${allLinks.slice(0, 5).join(' | ')}`)
-          }
-
-          for (const link of loteLinks) {
-            if (!seenUrls.has(link)) {
-              seenUrls.add(link)
-              lotLinks.push(link)
-            }
-          }
-        } catch (e) {
-          this.logger.warn(`Erro ao navegar ${listUrl}: ${String(e)}`)
-        }
-      }
-
-      await page.close()
-    } catch (e) {
-      this.logger.error(`Erro geral: ${String(e)}`)
+    if (!csrfToken) {
+      this.logger.warn('CSRF token não encontrado — abortando')
+      return []
     }
 
-    this.logger.log(`Total de lotes únicos encontrados: ${lotLinks.length}`)
+    this.logger.log(`CSRF token obtido (${csrfToken.length} chars)`)
+
+    // 2. POST para o endpoint AJAX que retorna os cards
+    const formData = new URLSearchParams({
+      '__RequestVerificationToken': csrfToken,
+      'Filtro.OrdenarPor':         'DataInicio',
+      'Filtro.SelecaoVeiculos':    'false',
+      'Filtro.SelecaoOutros':      'false',
+      'Filtro.Financiavel':        'false',
+    })
+
+    const listRes = await axios.post(
+      `${BASE_URL}/pesquisa?handler=pesquisar`,
+      formData.toString(),
+      {
+        headers: {
+          ...HEADERS,
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Cookie': cookies,
+        },
+        timeout: 30000,
+        maxRedirects: 5,
+      },
+    )
+
+    const $ = cheerio.load(listRes.data as string)
+    const cards = $('.card-lel, .card-anuncio').toArray()
+    this.logger.log(`Cards encontrados: ${cards.length}`)
+
+    if (cards.length === 0) {
+      this.logger.warn('Nenhum card encontrado. Amostra do HTML:')
+      this.logger.warn((listRes.data as string).substring(0, 500))
+      return []
+    }
 
     const results: Prisma.AuctionCreateInput[] = []
 
-    try {
-      const toScrape = lotLinks.slice(0, 20)
+    for (const card of cards.slice(0, 30)) {
+      try {
+        const el     = $(card)
+        const href   = el.find('a.anc-body, a.crd-link, a[href*="/evento/anuncio/"]').first().attr('href') ?? ''
+        const slug   = href.split('/evento/anuncio/')[1]?.split('?')[0]?.split('/')[0]
+        if (!slug) continue
 
-      for (const url of toScrape) {
-        try {
-          const auction = await this.scrapeLote(context, url)
-          if (auction) results.push(auction)
-          await new Promise(r => setTimeout(r, 800))
-        } catch (e) {
-          this.logger.warn(`Erro no lote ${url}: ${String(e)}`)
-        }
+        const sourceId  = slug
+        const sourceUrl = `${BASE_URL}/evento/anuncio/${slug}`
+        const title     = el.find('.anc-title h1').text().trim() || el.find('h1').first().text().trim()
+        if (!title) continue
+
+        const priceRaw  = el.find('.valor-atual').first().text().replace(/[^0-9,]/g, '').replace(',', '.')
+        const price     = parseFloat(priceRaw) || 1000
+
+        const localText = el.find('.anc-local').text()
+        const stateMatch = localText.match(/\b([A-Z]{2})\b/)
+        const state     = stateMatch?.[1] ?? 'SP'
+
+        const imgSrc = el.find('.crd-image img, img.card-img-top').first().attr('src') ?? ''
+
+        const titleLower    = title.toLowerCase()
+        const auctionType: AuctionType =
+          titleLower.includes('judicial') ? 'JUDICIAL' :
+          titleLower.includes('banco') || titleLower.includes('financeira') ? 'BANCARIO' :
+          'EXTRAJUDICIAL'
+
+        results.push({
+          sourceId,
+          sourceName:   'vip_leiloes',
+          sourceUrl,
+          title:        title.slice(0, 200),
+          description:  null,
+          category:     'VEICULO' as AuctionCategory,
+          auctionType,
+          status:       'ACTIVE' as AuctionStatus,
+          price,
+          city:         'Não informado',
+          state:        state.slice(0, 2),
+          attrs: {
+            origem:  'vip_leiloes',
+            imagens: imgSrc ? [imgSrc] : [],
+          },
+          scrapedAt:     new Date(),
+          lastCheckedAt: new Date(),
+        })
+      } catch (e) {
+        this.logger.warn(`Erro ao parsear card: ${String(e)}`)
       }
-    } finally {
-      await browser.close()
     }
 
     this.logger.log(`✅ VIP Leilões: ${results.length} lotes extraídos`)
     return results
-  }
-
-  private async scrapeLote(context: any, url: string): Promise<Prisma.AuctionCreateInput | null> {
-    const page = await context.newPage()
-    await page.route('**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf}', (r: any) => r.abort())
-
-    try {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 })
-      await page.waitForTimeout(3000)
-
-      const data = await page.evaluate(() => {
-        const getText = (sel: string) =>
-          document.querySelector(sel)?.textContent?.trim() ?? ''
-        const getAttr = (sel: string, attr: string) =>
-          (document.querySelector(sel) as any)?.[attr]?.trim() ?? ''
-
-        return {
-          title:       getText('h1') || getText('.lote-titulo') || getText('.titulo-lote'),
-          price:       getText('.lance-atual') || getText('.valor-lance') || getText('[class*="lance"]'),
-          location:    getText('.localizacao') || getText('[class*="local"]') || getText('[class*="cidade"]'),
-          auctionDate: getText('[class*="data"]') || getText('.data-leilao'),
-          images:      Array.from(document.querySelectorAll('[class*="foto"] img, [class*="imagem"] img, .carousel img'))
-                         .map(img => (img as HTMLImageElement).src).filter(s => s && !s.includes('data:')).slice(0, 5),
-          description: getText('[class*="descricao"]') || getText('[class*="observ"]'),
-          edital:      getAttr('a[href*="edital"]', 'href'),
-        }
-      })
-
-      if (!data.title) return null
-
-      const sourceId = url.split('/lote/')[1]?.split('?')[0]?.split('/')[0] ?? url
-
-      const priceStr  = data.price.replace(/[^0-9,]/g, '').replace(',', '.')
-      const price     = parseFloat(priceStr) || 0
-
-      const locParts  = data.location.split(/[-/,]/)
-      const city      = locParts[0]?.trim() || 'Não informado'
-      const stateRaw  = locParts[locParts.length - 1]?.trim().toUpperCase() || 'SP'
-      const state     = stateRaw.length === 2 ? stateRaw : 'SP'
-
-      const titleLower = data.title.toLowerCase()
-      const auctionType: AuctionType =
-        titleLower.includes('judicial') ? 'JUDICIAL' :
-        titleLower.includes('banco') || titleLower.includes('financeira') ? 'BANCARIO' :
-        'EXTRAJUDICIAL'
-
-      return {
-        sourceId,
-        sourceName: 'vip_leiloes',
-        sourceUrl:   url,
-        title:       data.title.slice(0, 200),
-        description: data.description || null,
-        category:    'VEICULO' as AuctionCategory,
-        auctionType,
-        status:      'ACTIVE' as AuctionStatus,
-        price:       price || 1000,
-        city,
-        state:       state.slice(0, 2),
-        attrs: {
-          origem: 'vip_leiloes',
-          imagens: data.images,
-          edital: data.edital,
-        },
-        scrapedAt:    new Date(),
-        lastCheckedAt: new Date(),
-      }
-
-    } finally {
-      await page.close()
-    }
   }
 }
