@@ -22,10 +22,13 @@ export class LeilaoJudicialSpider {
   async scrape(): Promise<Prisma.AuctionCreateInput[]> {
     this.logger.log('🕷 Leilão Judicial — iniciando scraping...')
     const results: Prisma.AuctionCreateInput[] = []
-    const lotUrls = new Set<string>()
+    // Mapeia URL do lote → categoria correta baseada na página de origem
+    const lotMap = new Map<string, AuctionCategory>()
 
     // Fase 1: coleta links de lotes paginando cada categoria
     for (const cat of CATEGORIES) {
+      const defaultCategory: AuctionCategory = cat === 'imoveis' ? 'IMOVEL' : 'VEICULO'
+
       for (let page = 0; page < MAX_PAGES; page++) {
         const listUrl = page === 0
           ? `${BASE_URL}/${cat}`
@@ -34,18 +37,17 @@ export class LeilaoJudicialSpider {
           const { data } = await axios.get(listUrl, { headers: HEADERS, timeout: 15000 })
           const $ = cheerio.load(data)
 
-          const before = lotUrls.size
+          const before = lotMap.size
           $('a[href*="/lote/"]').each((_, el) => {
             const href = $(el).attr('href') ?? ''
             if (!href) return
             const url = href.startsWith('http') ? href : `${BASE_URL}${href}`
-            lotUrls.add(url)
+            if (!lotMap.has(url)) lotMap.set(url, defaultCategory)
           })
 
-          const added = lotUrls.size - before
-          this.logger.log(`${listUrl}: +${added} links (total ${lotUrls.size})`)
+          const added = lotMap.size - before
+          this.logger.log(`${listUrl}: +${added} links (total ${lotMap.size})`)
 
-          // Se não adicionou nenhum novo, chegou no fim da paginação
           if (added === 0 && page > 0) break
           await this.delay(800)
         } catch (e) {
@@ -55,16 +57,16 @@ export class LeilaoJudicialSpider {
       }
     }
 
-    if (lotUrls.size === 0) {
+    if (lotMap.size === 0) {
       this.logger.warn('Nenhum link de lote encontrado — site pode ter bloqueado a requisição')
       return []
     }
 
-    // Fase 2: scraping de cada lote
-    const toScrape = [...lotUrls].slice(0, MAX_SCRAPE)
-    for (const url of toScrape) {
+    // Fase 2: scraping de cada lote com categoria correta da origem
+    const toScrape = [...lotMap.entries()].slice(0, MAX_SCRAPE)
+    for (const [url, categoryFromList] of toScrape) {
       try {
-        const item = await this.scrapeLote(url)
+        const item = await this.scrapeLote(url, categoryFromList)
         if (item) results.push(item)
         await this.delay(600)
       } catch (e) {
@@ -76,7 +78,7 @@ export class LeilaoJudicialSpider {
     return results
   }
 
-  private async scrapeLote(url: string): Promise<Prisma.AuctionCreateInput | null> {
+  private async scrapeLote(url: string, categoryFromList: AuctionCategory = 'VEICULO'): Promise<Prisma.AuctionCreateInput | null> {
     const { data } = await axios.get(url, { headers: HEADERS, timeout: 15000 })
     const $ = cheerio.load(data)
 
@@ -106,7 +108,8 @@ export class LeilaoJudicialSpider {
     const price    = this.parsePrice(priceText)
     const appraisedValue = this.parsePrice(appraisalText)
     const { city, state } = this.parseLocation(location)
-    const category = this.detectCategory(url, title)
+    // Usa a categoria da página de origem como base; refina pelo título se necessário
+    const category = this.refineCategory(categoryFromList, title)
 
     return {
       sourceId,
@@ -158,11 +161,13 @@ export class LeilaoJudicialSpider {
     return { city, state }
   }
 
-  private detectCategory(url: string, title: string): AuctionCategory {
-    const combined = `${url} ${title}`.toLowerCase()
-    if (combined.includes('imovel') || combined.includes('imóvel') ||
-        combined.includes('imoveis') || combined.includes('casa') ||
-        combined.includes('apartamento') || combined.includes('terreno')) {
+  // Refina categoria: página de origem define a base, título pode promover para IMOVEL
+  private refineCategory(base: AuctionCategory, title: string): AuctionCategory {
+    if (base === 'IMOVEL') return 'IMOVEL'
+    const t = title.toLowerCase()
+    if (t.includes('imóvel') || t.includes('imovel') || t.includes('casa') ||
+        t.includes('apart') || t.includes('terreno') || t.includes('lote') ||
+        t.includes('fazenda') || t.includes('sítio') || t.includes('galpão')) {
       return 'IMOVEL'
     }
     return 'VEICULO'
