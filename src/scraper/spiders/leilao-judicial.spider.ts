@@ -164,25 +164,51 @@ export class LeilaoJudicialSpider {
   }
 
   private readonly VEHICLE_KW = [
-    'honda','toyota','ford','fiat','chevrolet','vw','volkswagen','renault',
+    // Marcas
+    'honda','toyota','ford','fiat','chevrolet','gm','vw','volkswagen','renault',
     'hyundai','nissan','kia','jeep','bmw','audi','mercedes','volvo','peugeot',
-    'citroen','mitsubishi','yamaha','kawasaki','suzuki','ducati','triumph',
-    'veículo','veiculo','moto','motocicleta','carro','caminhão','caminhao',
-    'pickup','suv','automóvel','automovel','camionete','ônibus','onibus','van',
-    'gol','celta','corsa','palio','uno','siena','hilux','ranger','s10',
-    'frontier','amarok','duster','creta','hb20','onix','argo','kwid','sandero',
-    'ecosport','fiesta','civic','corolla','fit','city','hrv','crv','compass',
-    'renegade','toro','saveiro','strada','etios','yaris','kicks','tucson',
-    'sportage','captur','pulse','fastback','t-cross','tiguan','polo','virtus',
-    'fusca','beetle','golf','passat','jetta','fox','up!','nivus','taos',
+    'citroen','citroën','mitsubishi','yamaha','kawasaki','suzuki','ducati',
+    'triumph','harley','royal enfield','dafra','shineray','traxx',
+    // Tipos genéricos
+    'veículo','veiculo','automóvel','automovel','motocicleta','motocicletas',
+    'moto','motos','carro','carros','caminhão','caminhao','caminhões','caminhoes',
+    'pickup','suv','camionete','camionetes','ônibus','onibus','van','kombi',
+    'utilitário','utilitario','trator','reboque','semirreboque',
+    // Modelos populares
+    'gol','celta','corsa','palio','uno','siena','brava','marea','tempra',
+    'hilux','ranger','s10','frontier','amarok','l200','triton',
+    'duster','creta','hb20','onix','argo','kwid','sandero','logan',
+    'ecosport','fiesta','ka','focus','fusion','edge','bronco',
+    'civic','fit','city','hrv','crv','wrv','pilot',
+    'corolla','etios','yaris','sw4','hilux','rav4','land cruiser',
+    'compass','renegade','commander','toro','saveiro','strada','picape',
+    'kicks','sentra','frontier','versa','march',
+    'tucson','sportage','ceed','sorento','stinger',
+    'captur','kwid','master','duster','oroch',
+    'pulse','fastback','t-cross','tiguan','polo','virtus','nivus','taos',
+    'golf','passat','jetta','amarok','fox','up',
+    'astra','zafira','vectra','calibra','meriva','montana',
+    '208','308','2008','3008','partner',
+    'c3','c4','berlingo','jumper','jumpy',
+    'l300','pajero','outlander','lancer','eclipse',
+    'cb 300','cb 500','cb 600','cg 125','cg 150','cg 160','fan','titan',
+    'xre','nx','bros','pcx','biz','pop','lead',
+    'fazer','mt-07','mt-09','lander','crosser','factor','neo',
+    'dyna','bobber','v-strom','bandit','gsxr','gsx',
+    // Sinais de veículo judicial
+    'placa','renavam','chassi','gravame','penhora',
+    '20/20','21/21','22/22','23/23','24/24',
+    '/2015','/2016','/2017','/2018','/2019','/2020','/2021','/2022','/2023','/2024',
   ]
 
-  // Aceita apenas se o título contiver palavra-chave de veículo conhecida
+  // Aceita se título contiver palavra-chave de veículo OU padrão de ano de modelo
   private refineCategory(base: AuctionCategory, title: string): AuctionCategory {
     if (base === 'IMOVEL') return 'IMOVEL'
     const t = title.toLowerCase()
     if (this.VEHICLE_KW.some(k => t.includes(k))) return 'VEICULO'
-    return 'IMOVEL'  // título sem palavra-chave de veículo → descarta
+    // Padrão de ano modelo: "2018/2019", "2020/2021", "Ano 2019" etc.
+    if (/\b(19|20)\d{2}[/\s](19|20)\d{2}\b/.test(t)) return 'VEICULO'
+    return 'IMOVEL'
   }
 
   private delay(ms: number) {

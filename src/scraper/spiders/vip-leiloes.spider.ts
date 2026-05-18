@@ -1,15 +1,20 @@
 import { Injectable, Logger } from '@nestjs/common'
-import axios, { AxiosRequestConfig } from 'axios'
+import axios from 'axios'
 import * as cheerio from 'cheerio'
 import { AuctionCategory, AuctionStatus, AuctionType, Prisma } from '@prisma/client'
 
-const BASE_URL    = 'https://www.vipleiloes.com.br'
-const SEARCH_URL  = `${BASE_URL}/pesquisa/index`
-const API_KEY     = process.env.SCRAPER_API_KEY ?? ''
+const BASE_URL = 'https://www.vipleiloes.com.br'
+const API_KEY  = process.env.SCRAPER_API_KEY ?? ''
+
+// Tenta diferentes categorias para cobrir mais do catálogo
+const LIST_URLS = [
+  `${BASE_URL}/pesquisa/index`,
+  `${BASE_URL}/pesquisa/index?categoria=carros`,
+  `${BASE_URL}/pesquisa/index?categoria=motos`,
+  `${BASE_URL}/pesquisa/index?categoria=caminhoes`,
+]
 
 function scraperUrl(target: string): string {
-  // render=true: ScraperAPI roda headless Chrome e executa o JS da página
-  // wait_for_selector: aguarda os cards aparecerem antes de retornar
   return `http://api.scraperapi.com?api_key=${API_KEY}&url=${encodeURIComponent(target)}&render=true&wait_for_selector=.card-lel`
 }
 
@@ -25,65 +30,74 @@ export class VipLeiloesSpider {
 
     this.logger.log('🕷 VIP Leilões — scraping via ScraperAPI (render=true)...')
 
-    const res = await axios.get(scraperUrl(SEARCH_URL), {
-      timeout: 120000, // render=true pode demorar até 60s
-      maxRedirects: 5,
-    })
-
-    const $     = cheerio.load(res.data as string)
-    const cards = $('.card-lel, .card-anuncio').toArray()
-    this.logger.log(`Cards encontrados: ${cards.length}`)
-
-    if (cards.length === 0) {
-      this.logger.warn('Nenhum card. Amostra HTML:')
-      this.logger.warn((res.data as string).substring(0, 400))
-      return []
-    }
-
     const results: Prisma.AuctionCreateInput[] = []
+    const seen    = new Set<string>()
 
-    for (const card of cards.slice(0, 30)) {
-      try {
-        const el    = $(card)
-        const href  = el.find('a[href*="/evento/anuncio/"]').first().attr('href') ?? ''
-        const slug  = href.split('/evento/anuncio/')[1]?.split('?')[0]?.split('/')[0]
-        if (!slug) continue
+    // Busca todas as URLs de categoria em paralelo
+    const settled = await Promise.allSettled(
+      LIST_URLS.map(url =>
+        axios.get(scraperUrl(url), { timeout: 90000, maxRedirects: 5 })
+          .then(r => ({ url, html: r.data as string }))
+      )
+    )
 
-        const title = el.find('.anc-title h1').text().trim() || el.find('h1').first().text().trim()
-        if (!title) continue
+    for (const result of settled) {
+      if (result.status === 'rejected') {
+        this.logger.warn(`Erro ao buscar página: ${String(result.reason)}`)
+        continue
+      }
 
-        const priceRaw = el.find('.valor-atual').first().text().replace(/[^0-9,]/g, '').replace(',', '.')
-        const price    = parseFloat(priceRaw) || 1000
+      const { url: listUrl, html } = result.value
+      const $     = cheerio.load(html)
+      const cards = $('.card-lel, .card-anuncio').toArray().filter(el =>
+        !$(el).attr('style')?.includes('display:none')
+      )
+      this.logger.log(`${listUrl}: ${cards.length} cards`)
 
-        const stateMatch = el.find('.anc-local').text().match(/\b([A-Z]{2})\b/)
-        const state      = stateMatch?.[1] ?? 'SP'
+      for (const card of cards.slice(0, 30)) {
+        try {
+          const el   = $(card)
+          const href = el.find('a[href*="/evento/anuncio/"]').first().attr('href') ?? ''
+          const slug = href.split('/evento/anuncio/')[1]?.split('?')[0]?.split('/')[0]
+          if (!slug || seen.has(slug)) continue
+          seen.add(slug)
 
-        const imgSrc = el.find('.crd-image img, img.card-img-top').first().attr('src') ?? ''
+          const title = el.find('.anc-title h1').text().trim() || el.find('h1').first().text().trim()
+          if (!title) continue
 
-        const titleLower  = title.toLowerCase()
-        const auctionType: AuctionType =
-          titleLower.includes('judicial') ? 'JUDICIAL' :
-          titleLower.includes('banco') || titleLower.includes('financeira') ? 'BANCARIO' :
-          'EXTRAJUDICIAL'
+          const priceRaw = el.find('.valor-atual').first().text().replace(/[^0-9,]/g, '').replace(',', '.')
+          const price    = parseFloat(priceRaw) || 1000
 
-        results.push({
-          sourceId:     slug,
-          sourceName:   'vip_leiloes',
-          sourceUrl:    `${BASE_URL}/evento/anuncio/${slug}`,
-          title:        title.slice(0, 200),
-          description:  null,
-          category:     'VEICULO' as AuctionCategory,
-          auctionType,
-          status:       'ACTIVE' as AuctionStatus,
-          price,
-          city:         'Não informado',
-          state:        state.slice(0, 2),
-          attrs:        { origem: 'vip_leiloes', imagens: imgSrc ? [imgSrc] : [] },
-          scrapedAt:    new Date(),
-          lastCheckedAt: new Date(),
-        })
-      } catch (e) {
-        this.logger.warn(`Erro ao parsear card: ${String(e)}`)
+          const stateMatch = el.find('.anc-local').text().match(/\b([A-Z]{2})\b/)
+          const state      = stateMatch?.[1] ?? 'SP'
+
+          const imgSrc = el.find('.crd-image img, img.card-img-top').first().attr('src') ?? ''
+
+          const titleLower  = title.toLowerCase()
+          const auctionType: AuctionType =
+            titleLower.includes('judicial') ? 'JUDICIAL' :
+            titleLower.includes('banco') || titleLower.includes('financeira') ? 'BANCARIO' :
+            'EXTRAJUDICIAL'
+
+          results.push({
+            sourceId:      slug,
+            sourceName:    'vip_leiloes',
+            sourceUrl:     `${BASE_URL}/evento/anuncio/${slug}`,
+            title:         title.slice(0, 200),
+            description:   null,
+            category:      'VEICULO' as AuctionCategory,
+            auctionType,
+            status:        'ACTIVE' as AuctionStatus,
+            price,
+            city:          'Não informado',
+            state:         state.slice(0, 2),
+            attrs:         { origem: 'vip_leiloes', imagens: imgSrc ? [imgSrc] : [] },
+            scrapedAt:     new Date(),
+            lastCheckedAt: new Date(),
+          })
+        } catch (e) {
+          this.logger.warn(`Erro ao parsear card: ${String(e)}`)
+        }
       }
     }
 
