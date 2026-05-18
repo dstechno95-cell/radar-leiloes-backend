@@ -7,10 +7,11 @@ import { LanceCertoSpider } from './spiders/lance-certo.spider'
 import { LeiloSpider } from './spiders/leilo.spider'
 import { LeilaoJudicialSpider } from './spiders/leilao-judicial.spider'
 import { SuperbidSpider } from './spiders/superbid.spider'
+import { MegaleiloesSpider } from './spiders/megaleiloes.spider'
 
 @Module({
   imports: [ScheduleModule.forRoot()],
-  providers: [ScraperService, VipLeiloesSpider, LanceCertoSpider, LeiloSpider, LeilaoJudicialSpider, SuperbidSpider],
+  providers: [ScraperService, VipLeiloesSpider, LanceCertoSpider, LeiloSpider, LeilaoJudicialSpider, SuperbidSpider, MegaleiloesSpider],
   controllers: [ScraperController],
   exports: [ScraperService],
 })

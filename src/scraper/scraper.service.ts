@@ -6,6 +6,7 @@ import { LanceCertoSpider } from './spiders/lance-certo.spider'
 import { LeiloSpider } from './spiders/leilo.spider'
 import { LeilaoJudicialSpider } from './spiders/leilao-judicial.spider'
 import { SuperbidSpider } from './spiders/superbid.spider'
+import { MegaleiloesSpider } from './spiders/megaleiloes.spider'
 import { Prisma } from '@prisma/client'
 
 type SpiderFn = () => Promise<Prisma.AuctionCreateInput[]>
@@ -22,6 +23,7 @@ export class ScraperService {
     private leiloSpider: LeiloSpider,
     private leilaoJudicialSpider: LeilaoJudicialSpider,
     private superbidSpider: SuperbidSpider,
+    private megaleiloesSpider: MegaleiloesSpider,
   ) {}
 
   // 06h00 e 22h00 (horário de Brasília)
@@ -45,14 +47,15 @@ export class ScraperService {
     try {
       const results = await Promise.allSettled([
         this.runSpider('superbid',       () => this.superbidSpider.scrape()),
+        this.runSpider('megaleiloes',    () => this.megaleiloesSpider.scrape()),
         this.runSpider('leilao_judicial',() => this.leilaoJudicialSpider.scrape()),
+        this.runSpider('vip_leiloes',    () => this.vipSpider.scrape()),
         this.runSpider('lance_certo',    () => this.lanceCertoSpider.scrape()),
         this.runSpider('leilo',          () => this.leiloSpider.scrape()),
-        this.runSpider('vip_leiloes',    () => this.vipSpider.scrape()),
       ])
 
       const summary = results.map((r, i) => ({
-        spider: ['superbid', 'leilao_judicial', 'lance_certo', 'leilo', 'vip_leiloes'][i],
+        spider: ['superbid', 'megaleiloes', 'leilao_judicial', 'vip_leiloes', 'lance_certo', 'leilo'][i],
         ok:     r.status === 'fulfilled',
         data:   r.status === 'fulfilled' ? r.value : { error: String(r.reason) },
       }))

@@ -5,7 +5,7 @@ import { AuctionCategory, AuctionStatus, AuctionType, Prisma } from '@prisma/cli
 
 const BASE_URL  = 'https://exchange.superbid.net'
 const CAT_URL   = `${BASE_URL}/categorias/carros-motos`
-const MAX_PAGES = 5   // 5 × 30 = 150 itens por ciclo
+const MAX_PAGES = 8   // 8 × 30 = 240 itens por ciclo
 const PAGE_SIZE = 30
 
 const HEADERS = {

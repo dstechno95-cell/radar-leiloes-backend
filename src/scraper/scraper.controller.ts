@@ -5,6 +5,7 @@ import { LanceCertoSpider } from './spiders/lance-certo.spider'
 import { LeiloSpider } from './spiders/leilo.spider'
 import { LeilaoJudicialSpider } from './spiders/leilao-judicial.spider'
 import { SuperbidSpider } from './spiders/superbid.spider'
+import { MegaleiloesSpider } from './spiders/megaleiloes.spider'
 
 // Rota interna — proteger com API key em produção
 @Controller('scraper')
@@ -16,6 +17,7 @@ export class ScraperController {
     private leiloSpider: LeiloSpider,
     private leilaoJudicialSpider: LeilaoJudicialSpider,
     private superbidSpider: SuperbidSpider,
+    private megaleiloesSpider: MegaleiloesSpider,
   ) {}
 
   @Post('run')
@@ -56,6 +58,11 @@ export class ScraperController {
   @Post('run/superbid')
   runSuperbid() {
     return this.scraper.runSpider('superbid', () => this.superbidSpider.scrape())
+  }
+
+  @Post('run/megaleiloes')
+  runMegaleiloes() {
+    return this.scraper.runSpider('megaleiloes', () => this.megaleiloesSpider.scrape())
   }
 
   @Post('cleanup')
