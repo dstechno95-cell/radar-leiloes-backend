@@ -6,12 +6,12 @@ import { AuctionCategory, AuctionStatus, AuctionType, Prisma } from '@prisma/cli
 const BASE_URL  = 'https://www.megaleiloes.com.br'
 const CAT_URL   = `${BASE_URL}/veiculos`
 const MAX_PAGES = 5   // 5 × 48 = 240 itens
+const API_KEY   = process.env.SCRAPER_API_KEY ?? ''
 
-const HEADERS = {
-  'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-  'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
-  'Cache-Control':   'no-cache',
+// Sem render=true: 1 crédito/req (suficiente para bypassar Cloudflare básico)
+function scraperUrl(target: string): string {
+  if (!API_KEY) return target
+  return `http://api.scraperapi.com?api_key=${API_KEY}&url=${encodeURIComponent(target)}&country_code=br`
 }
 
 @Injectable()
@@ -19,14 +19,19 @@ export class MegaleiloesSpider {
   private readonly logger = new Logger(MegaleiloesSpider.name)
 
   async scrape(): Promise<Prisma.AuctionCreateInput[]> {
-    this.logger.log('🕷 Mega Leilões — iniciando scraping...')
+    if (!API_KEY) {
+      this.logger.warn('SCRAPER_API_KEY não configurada — pulando Mega Leilões')
+      return []
+    }
+
+    this.logger.log('🕷 Mega Leilões — scraping via ScraperAPI...')
     const results: Prisma.AuctionCreateInput[] = []
     const seen    = new Set<string>()
 
     for (let page = 1; page <= MAX_PAGES; page++) {
       const pageUrl = page === 1 ? CAT_URL : `${CAT_URL}?pagina=${page}`
       try {
-        const { data } = await axios.get(pageUrl, { headers: HEADERS, timeout: 20000 })
+        const { data } = await axios.get(scraperUrl(pageUrl), { timeout: 30000 })
         const $ = cheerio.load(data)
 
         // Cards: <a> com href contendo "/veiculos/" e "-j" (lot ID pattern)
