@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common'
 import axios, { AxiosRequestConfig } from 'axios'
 import * as cheerio from 'cheerio'
-import * as https from 'https'
 import { AuctionCategory, AuctionStatus, AuctionType, Prisma } from '@prisma/client'
 
 const BASE_URL = 'https://www.vipleiloes.com.br'
@@ -18,12 +17,11 @@ function scraperConfig(): Partial<AxiosRequestConfig> {
   if (!key) return {}
   return {
     proxy: {
+      protocol: 'http',
       host: 'proxy-server.scraperapi.com',
       port: 8001,
       auth: { username: 'scraperapi', password: key },
     },
-    // ScraperAPI usa certificado próprio no proxy
-    httpsAgent: new https.Agent({ rejectUnauthorized: false }),
   }
 }
 
