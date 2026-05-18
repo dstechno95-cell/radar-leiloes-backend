@@ -23,14 +23,16 @@ export class VipLeiloesSpider {
     // 1. Pega o CSRF token da página inicial
     const initRes = await axios.get(`${BASE_URL}/pesquisa/index`, {
       headers: { ...HEADERS, 'X-Requested-With': undefined },
-      withCredentials: true,
-      maxRedirects: 5,
+      maxRedirects: 10,
       timeout: 30000,
     })
 
     const $init = cheerio.load(initRes.data as string)
     const csrfToken = $init('input[name="__RequestVerificationToken"]').val() as string
-    const cookies   = (initRes.headers['set-cookie'] ?? []).join('; ')
+    // Extrai apenas name=value de cada cookie (sem atributos HttpOnly/SameSite)
+    const cookies = ((initRes.headers['set-cookie'] as string[] | undefined) ?? [])
+      .map((c: string) => c.split(';')[0])
+      .join('; ')
 
     if (!csrfToken) {
       this.logger.warn('CSRF token não encontrado — abortando')
