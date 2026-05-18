@@ -30,9 +30,15 @@ export class MegaleiloesSpider {
         const $ = cheerio.load(data)
 
         // Cards: <a> com href contendo "/veiculos/" e "-j" (lot ID pattern)
-        const cards = $('a[href*="/veiculos/"][href*="-j"]').toArray()
+        // Tenta seletores progressivamente mais amplos
+        let cards = $('a[href*="/veiculos/"][href*="-j"]').toArray()
+        if (cards.length === 0) cards = $('a[href*="/veiculos/carros/"], a[href*="/veiculos/motos/"], a[href*="/veiculos/caminhoes/"]').toArray()
         this.logger.log(`Página ${page}: ${cards.length} cards`)
-        if (cards.length === 0) break
+
+        if (cards.length === 0) {
+          this.logger.warn(`Nenhum card — amostra HTML: ${(data as string).slice(0, 600)}`)
+          break
+        }
 
         let added = 0
         for (const card of cards) {
