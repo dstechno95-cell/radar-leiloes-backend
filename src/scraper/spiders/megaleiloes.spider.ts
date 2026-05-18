@@ -5,13 +5,12 @@ import { AuctionCategory, AuctionStatus, AuctionType, Prisma } from '@prisma/cli
 
 const BASE_URL  = 'https://www.megaleiloes.com.br'
 const CAT_URL   = `${BASE_URL}/veiculos`
-const MAX_PAGES = 5   // 5 × 48 = 240 itens
+const MAX_PAGES = 1   // teste: 1 página — aumentar para 5 após confirmar
 const API_KEY   = process.env.SCRAPER_API_KEY ?? ''
 
-// Sem render=true: 1 crédito/req (suficiente para bypassar Cloudflare básico)
 function scraperUrl(target: string): string {
   if (!API_KEY) return target
-  return `http://api.scraperapi.com?api_key=${API_KEY}&url=${encodeURIComponent(target)}&country_code=br`
+  return `http://api.scraperapi.com?api_key=${API_KEY}&url=${encodeURIComponent(target)}&render=true&country_code=br&wait_for_selector=a[href*="/veiculos/"]`
 }
 
 @Injectable()
@@ -31,7 +30,7 @@ export class MegaleiloesSpider {
     for (let page = 1; page <= MAX_PAGES; page++) {
       const pageUrl = page === 1 ? CAT_URL : `${CAT_URL}?pagina=${page}`
       try {
-        const { data } = await axios.get(scraperUrl(pageUrl), { timeout: 30000 })
+        const { data } = await axios.get(scraperUrl(pageUrl), { timeout: 90000 })
         const $ = cheerio.load(data)
 
         // Cards: <a> com href contendo "/veiculos/" e "-j" (lot ID pattern)
