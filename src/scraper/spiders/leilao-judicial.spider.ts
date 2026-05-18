@@ -4,7 +4,7 @@ import * as cheerio from 'cheerio'
 import { AuctionCategory, AuctionStatus, AuctionType, Prisma } from '@prisma/client'
 
 const BASE_URL    = 'https://www.leiloesjudiciais.com.br'
-const CATEGORIES  = ['veiculos', 'imoveis']
+const CATEGORIES  = ['veiculos']
 const MAX_PAGES   = 5   // 5 páginas × ~25 lotes = ~125 lotes por categoria
 const MAX_SCRAPE  = 150 // limite total de lotes para scraping por ciclo
 
