@@ -138,25 +138,41 @@ export class ScraperService {
   }
 
   async cleanupPropertyRecords() {
-    const keywords = [
-      'fazenda','sítio','sitio','hectare','apartamento','apto',
-      'imóvel','imovel','terreno','galpão','galpao','sobrado',
-      'cobertura','chácara','chacara','rural','agricol',
+    // Deleta registros que claramente não são veículos:
+    // 1) category = IMOVEL
+    // 2) sourceName = leilao_judicial E título sem palavra-chave de veículo
+    const vehicleKw = [
+      'honda','toyota','ford','fiat','chevrolet','volkswagen','renault',
+      'hyundai','nissan','kia','jeep','bmw','audi','mercedes','volvo',
+      'peugeot','citroen','mitsubishi','yamaha','kawasaki','suzuki',
+      'veículo','veiculo','moto','carro','caminhao','pickup','suv',
+      'gol','celta','corsa','palio','hilux','ranger','duster','creta',
+      'hb20','onix','kwid','sandero','civic','corolla','hrv','compass',
+      'renegade','saveiro','strada','tucson','sportage','captur','polo',
     ]
-    const orConditions = keywords.map(k => ({
-      title: { contains: k, mode: 'insensitive' as const },
-    }))
 
-    const deleted = await this.prisma.auction.deleteMany({
-      where: {
-        OR: [
-          { category: 'IMOVEL' },
-          ...orConditions,
-        ],
-      },
+    // Busca todos os de leilao_judicial
+    const judicialItems = await this.prisma.auction.findMany({
+      where:  { sourceName: 'leilao_judicial' },
+      select: { id: true, title: true },
     })
 
-    this.logger.log(`🧹 Cleanup: ${deleted.count} registros de imóveis deletados`)
-    return { deleted: deleted.count }
+    const toDelete = judicialItems
+      .filter(({ title }) => {
+        const t = title.toLowerCase()
+        return !vehicleKw.some(k => t.includes(k))
+      })
+      .map(({ id }) => id)
+
+    const [byCategory, byTitle] = await Promise.all([
+      this.prisma.auction.deleteMany({ where: { category: 'IMOVEL' } }),
+      toDelete.length
+        ? this.prisma.auction.deleteMany({ where: { id: { in: toDelete } } })
+        : Promise.resolve({ count: 0 }),
+    ])
+
+    const total = byCategory.count + byTitle.count
+    this.logger.log(`🧹 Cleanup: ${total} registros deletados (${byCategory.count} por categoria, ${byTitle.count} por título)`)
+    return { deleted: total, byCategory: byCategory.count, byTitle: byTitle.count }
   }
 }

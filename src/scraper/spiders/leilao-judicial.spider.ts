@@ -110,6 +110,8 @@ export class LeilaoJudicialSpider {
     const { city, state } = this.parseLocation(location)
     // Usa a categoria da página de origem como base; refina pelo título se necessário
     const category = this.refineCategory(categoryFromList, title)
+    // Rejeita lotes sem palavra-chave de veículo — provavelmente imóveis mal categorizados
+    if (category !== 'VEICULO') return null
 
     return {
       sourceId,
@@ -161,16 +163,26 @@ export class LeilaoJudicialSpider {
     return { city, state }
   }
 
-  // Refina categoria: página de origem define a base, título pode promover para IMOVEL
+  private readonly VEHICLE_KW = [
+    'honda','toyota','ford','fiat','chevrolet','vw','volkswagen','renault',
+    'hyundai','nissan','kia','jeep','bmw','audi','mercedes','volvo','peugeot',
+    'citroen','mitsubishi','yamaha','kawasaki','suzuki','ducati','triumph',
+    'veículo','veiculo','moto','motocicleta','carro','caminhão','caminhao',
+    'pickup','suv','automóvel','automovel','camionete','ônibus','onibus','van',
+    'gol','celta','corsa','palio','uno','siena','hilux','ranger','s10',
+    'frontier','amarok','duster','creta','hb20','onix','argo','kwid','sandero',
+    'ecosport','fiesta','civic','corolla','fit','city','hrv','crv','compass',
+    'renegade','toro','saveiro','strada','etios','yaris','kicks','tucson',
+    'sportage','captur','pulse','fastback','t-cross','tiguan','polo','virtus',
+    'fusca','beetle','golf','passat','jetta','fox','up!','nivus','taos',
+  ]
+
+  // Aceita apenas se o título contiver palavra-chave de veículo conhecida
   private refineCategory(base: AuctionCategory, title: string): AuctionCategory {
     if (base === 'IMOVEL') return 'IMOVEL'
     const t = title.toLowerCase()
-    if (t.includes('imóvel') || t.includes('imovel') || t.includes('casa') ||
-        t.includes('apart') || t.includes('terreno') || t.includes('lote') ||
-        t.includes('fazenda') || t.includes('sítio') || t.includes('galpão')) {
-      return 'IMOVEL'
-    }
-    return 'VEICULO'
+    if (this.VEHICLE_KW.some(k => t.includes(k))) return 'VEICULO'
+    return 'IMOVEL'  // título sem palavra-chave de veículo → descarta
   }
 
   private delay(ms: number) {
