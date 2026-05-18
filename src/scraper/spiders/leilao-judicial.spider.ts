@@ -57,11 +57,19 @@ export class LeilaoJudicialSpider {
 
             const fullText = $card.text().replace(/\s+/g, ' ').trim()
 
-            // Título: linha com marca/modelo/ano (ex: "HONDA/NXR 160 BROS - 18/18")
-            const titleLine = fullText.split(/\n|\r|clique para/)
-              .map(s => s.trim())
-              .find(s => s.length > 5 && /[A-Z]{2,}/.test(s) && !/^(Aberto|Encerrado|Lance|Avaliação|Página|\d+$)/.test(s))
-            const title = titleLine ?? fullText.slice(0, 100)
+            // Título: texto entre "Lance<N>" e "Avaliação/Lance mínimo/R$"
+            const lanceIdx = fullText.search(/Lance\s*\d+/i)
+            const priceIdx = fullText.search(/Avaliação|Lance m[íi]nimo|Lance Atual/i)
+            let titleRaw = ''
+            if (lanceIdx >= 0 && priceIdx > lanceIdx) {
+              titleRaw = fullText.slice(lanceIdx, priceIdx).replace(/^Lance\s*\d+\s*/i, '').trim()
+            } else if (lanceIdx >= 0) {
+              titleRaw = fullText.slice(lanceIdx).replace(/^Lance\s*\d+\s*/i, '').trim().slice(0, 200)
+            } else {
+              titleRaw = fullText.slice(0, 150)
+            }
+            // Remove localização duplicada no final: "...CIDADE/SPCidade/SP" → "...CIDADE/SP"
+            const title = titleRaw.replace(/\/([A-Z]{2})([A-Z][a-zà-ÿ][\s\S]*)$/u, '/$1').trim().slice(0, 200)
             if (!title || title.length < 4) continue
 
             // Imagem S3
