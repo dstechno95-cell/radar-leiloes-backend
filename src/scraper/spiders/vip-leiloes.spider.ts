@@ -3,26 +3,14 @@ import axios, { AxiosRequestConfig } from 'axios'
 import * as cheerio from 'cheerio'
 import { AuctionCategory, AuctionStatus, AuctionType, Prisma } from '@prisma/client'
 
-const BASE_URL = 'https://www.vipleiloes.com.br'
+const BASE_URL    = 'https://www.vipleiloes.com.br'
+const SEARCH_URL  = `${BASE_URL}/pesquisa/index`
+const API_KEY     = process.env.SCRAPER_API_KEY ?? ''
 
-const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  'Accept-Language': 'pt-BR,pt;q=0.9',
-  'Referer': `${BASE_URL}/pesquisa/index`,
-}
-
-function scraperConfig(): Partial<AxiosRequestConfig> {
-  const key = process.env.SCRAPER_API_KEY
-  if (!key) return {}
-  return {
-    proxy: {
-      protocol: 'http',
-      host: 'proxy-server.scraperapi.com',
-      port: 8001,
-      auth: { username: 'scraperapi', password: key },
-    },
-  }
+function scraperUrl(target: string): string {
+  // render=true: ScraperAPI roda headless Chrome e executa o JS da página
+  // wait_for_selector: aguarda os cards aparecerem antes de retornar
+  return `http://api.scraperapi.com?api_key=${API_KEY}&url=${encodeURIComponent(target)}&render=true&wait_for_selector=.card-lel`
 }
 
 @Injectable()
@@ -30,62 +18,25 @@ export class VipLeiloesSpider {
   private readonly logger = new Logger(VipLeiloesSpider.name)
 
   async scrape(): Promise<Prisma.AuctionCreateInput[]> {
-    const usingProxy = !!process.env.SCRAPER_API_KEY
-    this.logger.log(`🕷 VIP Leilões — iniciando scraping (proxy: ${usingProxy})...`)
-
-    // 1. Pega o CSRF token da página inicial
-    const initRes = await axios.get(`${BASE_URL}/pesquisa/index`, {
-      headers: { ...HEADERS },
-      maxRedirects: 10,
-      timeout: 30000,
-      ...scraperConfig(),
-    })
-
-    const $init     = cheerio.load(initRes.data as string)
-    const csrfToken = $init('input[name="__RequestVerificationToken"]').val() as string
-    const cookies   = ((initRes.headers['set-cookie'] as string[] | undefined) ?? [])
-      .map((c: string) => c.split(';')[0])
-      .join('; ')
-
-    if (!csrfToken) {
-      this.logger.warn('CSRF token não encontrado — abortando')
+    if (!API_KEY) {
+      this.logger.warn('SCRAPER_API_KEY não configurada — pulando VIP Leilões')
       return []
     }
 
-    this.logger.log(`CSRF token obtido (${csrfToken.length} chars)`)
+    this.logger.log('🕷 VIP Leilões — scraping via ScraperAPI (render=true)...')
 
-    // 2. POST para o endpoint AJAX que retorna os cards
-    const formData = new URLSearchParams({
-      '__RequestVerificationToken': csrfToken,
-      'Filtro.OrdenarPor':         'DataInicio',
-      'Filtro.SelecaoVeiculos':    'false',
-      'Filtro.SelecaoOutros':      'false',
-      'Filtro.Financiavel':        'false',
+    const res = await axios.get(scraperUrl(SEARCH_URL), {
+      timeout: 120000, // render=true pode demorar até 60s
+      maxRedirects: 5,
     })
 
-    const listRes = await axios.post(
-      `${BASE_URL}/pesquisa?handler=pesquisar`,
-      formData.toString(),
-      {
-        headers: {
-          ...HEADERS,
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'X-Requested-With': 'XMLHttpRequest',
-          'Cookie': cookies,
-        },
-        timeout: 30000,
-        maxRedirects: 5,
-        ...scraperConfig(),
-      },
-    )
-
-    const $     = cheerio.load(listRes.data as string)
+    const $     = cheerio.load(res.data as string)
     const cards = $('.card-lel, .card-anuncio').toArray()
     this.logger.log(`Cards encontrados: ${cards.length}`)
 
     if (cards.length === 0) {
-      this.logger.warn('Nenhum card — amostra HTML:')
-      this.logger.warn((listRes.data as string).substring(0, 300))
+      this.logger.warn('Nenhum card. Amostra HTML:')
+      this.logger.warn((res.data as string).substring(0, 400))
       return []
     }
 
