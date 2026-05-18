@@ -1,124 +1,111 @@
 import { Injectable, Logger } from '@nestjs/common'
+import axios from 'axios'
+import * as cheerio from 'cheerio'
 import { AuctionCategory, AuctionStatus, AuctionType, Prisma } from '@prisma/client'
-import { chromium } from 'playwright-core'
 
-// Lance Certo roda na plataforma VIP Leilões (JavaScript-rendered).
-// Usa Playwright para renderizar o conteúdo dinâmico.
 const BASE_URL = 'https://www.lancecertoleiloes.com.br'
+const API_KEY  = process.env.SCRAPER_API_KEY ?? ''
+
 const LIST_URLS = [
   `${BASE_URL}/filtro/carros`,
   `${BASE_URL}/filtro/motos`,
   `${BASE_URL}/filtro/pesados`,
 ]
 
+function scraperUrl(target: string): string {
+  return `http://api.scraperapi.com?api_key=${API_KEY}&url=${encodeURIComponent(target)}&render=true&wait_for_selector=.listagem-leilao`
+}
+
 @Injectable()
 export class LanceCertoSpider {
   private readonly logger = new Logger(LanceCertoSpider.name)
 
   async scrape(): Promise<Prisma.AuctionCreateInput[]> {
-    this.logger.log('🕷 Lance Certo — iniciando scraping (Playwright)...')
+    if (!API_KEY) {
+      this.logger.warn('SCRAPER_API_KEY não configurada — pulando Lance Certo')
+      return []
+    }
+
+    this.logger.log('🕷 Lance Certo — scraping via ScraperAPI (render=true)...')
+
+    const seen    = new Set<string>()
     const results: Prisma.AuctionCreateInput[] = []
-    const seen = new Set<string>()
 
-    let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null
-    try {
-      browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] })
-      const context = await browser.newContext({
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
-        locale: 'pt-BR',
-      })
+    for (const listUrl of LIST_URLS) {
+      try {
+        const res = await axios.get(scraperUrl(listUrl), {
+          timeout: 120000,
+          maxRedirects: 5,
+        })
 
-      for (const listUrl of LIST_URLS) {
-        try {
-          const page = await context.newPage()
-          await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
-          await page.waitForTimeout(2000)
+        const $     = cheerio.load(res.data as string)
+        const cards = $('.listagem-leilao').toArray().filter(el =>
+          // Ignora o item de teste (display:none)
+          !$(el).attr('style')?.includes('display:none')
+        )
 
-          // Extrai cards da listagem
-          const items = await page.evaluate(() => {
-            const cards: Array<{title:string; price:string; href:string; location:string; img:string}> = []
-            const els = document.querySelectorAll('a[href*="/leilao/"], a[href*="/lote/"], [class*="card"], [class*="lote"], [class*="item"]')
-            els.forEach(el => {
-              const anchor = el.tagName === 'A' ? el as HTMLAnchorElement : el.querySelector('a')
-              if (!anchor) return
-              const title = (el.querySelector('h1,h2,h3,h4,[class*="title"],[class*="titulo"],[class*="modelo"]') as HTMLElement)?.innerText?.trim() ?? ''
-              const price = (el.querySelector('[class*="lance"],[class*="valor"],[class*="preco"],[class*="price"]') as HTMLElement)?.innerText?.trim() ?? ''
-              const location = (el.querySelector('[class*="local"],[class*="cidade"],[class*="estado"]') as HTMLElement)?.innerText?.trim() ?? ''
-              const img   = (el.querySelector('img') as HTMLImageElement)?.src ?? ''
-              if (title && title.length > 3) {
-                cards.push({ title, price, href: anchor.href, location, img })
-              }
-            })
-            return cards
-          })
+        this.logger.log(`${listUrl}: ${cards.length} cards`)
 
-          for (const item of items.slice(0, 20)) {
-            const sourceId = item.href.split('/').filter(Boolean).pop() ?? Math.random().toString(36).slice(2)
-            if (seen.has(sourceId)) continue
+        for (const card of cards.slice(0, 20)) {
+          try {
+            const el   = $(card)
+            const href = el.find('a[href*="/leilao/"]').first().attr('href') ?? ''
+            if (!href) continue
+
+            // Normaliza URL relativa
+            const absUrl  = href.startsWith('http') ? href : `${BASE_URL}/${href.replace(/^\.\.\//, '')}`
+            const sourceId = absUrl.split('/lote/')[1]?.split(/[/?]/)[0] ?? absUrl.split('/').pop() ?? ''
+            if (!sourceId || seen.has(sourceId)) continue
             seen.add(sourceId)
 
-            const price = this.parsePrice(item.price)
-            const { city, state } = this.parseLocation(item.location)
-            const category = this.detectCategory(listUrl, item.title)
+            const modelLine = el.find('.lote-descricao b').filter((_, b) => $(b).text().trim() === 'Modelo').parent().text()
+            const title     = modelLine.replace('Modelo:', '').split('\n')[0].trim() ||
+                              el.find('.lote-descricao').text().trim().split('\n')[0].trim()
+            if (!title || title.length < 3) continue
+
+            const localText  = el.find('.lote-descricao').text()
+            const localMatch = localText.match(/Local[^:]*:\s*([^<\n]+)/i)
+            const location   = localMatch?.[1]?.trim() ?? ''
+            const stateMatch = location.match(/\b([A-Z]{2})\b/)
+            const state      = stateMatch?.[1] ?? 'PE'
+            const city       = location.split(/[-,]/)[0]?.trim() || 'Não informado'
+
+            const priceText = el.find('.lote-resultado, [class*="valor"]').first().text()
+            const priceRaw  = priceText.replace(/[^0-9,]/g, '').replace(',', '.')
+            const price     = parseFloat(priceRaw) || 1000
+
+            const imgSrc    = el.find('img.lote-img').first().attr('src') ?? ''
+
+            const titleLower  = title.toLowerCase()
+            const category: AuctionCategory = titleLower.includes('imovel') || titleLower.includes('casa') || titleLower.includes('terreno')
+              ? 'IMOVEL' : 'VEICULO'
 
             results.push({
               sourceId,
-              sourceName:  'lance_certo',
-              sourceUrl:   item.href,
-              title:       item.title.slice(0, 200),
+              sourceName:   'lance_certo',
+              sourceUrl:    absUrl,
+              title:        title.slice(0, 200),
+              description:  null,
               category,
-              auctionType: 'EXTRAJUDICIAL' as AuctionType,
-              status:      'ACTIVE' as AuctionStatus,
-              price:       price || 5000,
+              auctionType:  'EXTRAJUDICIAL' as AuctionType,
+              status:       'ACTIVE' as AuctionStatus,
+              price,
               city,
-              state,
-              attrs: { origem: 'lance_certo', imagens: item.img ? [item.img] : [] },
-              scrapedAt:     new Date(),
+              state:        state.slice(0, 2),
+              attrs:        { origem: 'lance_certo', imagens: imgSrc ? [imgSrc] : [] },
+              scrapedAt:    new Date(),
               lastCheckedAt: new Date(),
             })
+          } catch (e) {
+            this.logger.warn(`Erro ao parsear card: ${String(e)}`)
           }
-
-          await page.close()
-          this.logger.log(`${listUrl}: ${items.length} cards encontrados`)
-          await this.delay(2000)
-        } catch (e) {
-          this.logger.warn(`Erro em ${listUrl}: ${String(e)}`)
         }
+      } catch (e) {
+        this.logger.warn(`Erro em ${listUrl}: ${String(e)}`)
       }
-    } catch (e) {
-      this.logger.error(`Lance Certo falhou: ${String(e)}`)
-    } finally {
-      await browser?.close()
     }
 
     this.logger.log(`✅ Lance Certo: ${results.length} lotes extraídos`)
     return results
-  }
-
-  private parsePrice(text: string): number {
-    if (!text) return 0
-    const clean = text.replace(/[^0-9,]/g, '').replace(',', '.')
-    return parseFloat(clean) || 0
-  }
-
-  private parseLocation(text: string): { city: string; state: string } {
-    if (!text) return { city: 'Não informado', state: 'PE' }
-    const parts = text.split(/[-/,\n]/).map(s => s.trim()).filter(Boolean)
-    const city  = parts[0] || 'Não informado'
-    const rawSt = parts[parts.length - 1]?.toUpperCase() || 'PE'
-    const state = rawSt.length === 2 && /^[A-Z]{2}$/.test(rawSt) ? rawSt : 'PE'
-    return { city, state }
-  }
-
-  private detectCategory(url: string, title: string): AuctionCategory {
-    const combined = `${url} ${title}`.toLowerCase()
-    if (combined.includes('imovel') || combined.includes('imóvel') || combined.includes('casa')) {
-      return 'IMOVEL'
-    }
-    return 'VEICULO'
-  }
-
-  private delay(ms: number) {
-    return new Promise(resolve => setTimeout(resolve, ms))
   }
 }
