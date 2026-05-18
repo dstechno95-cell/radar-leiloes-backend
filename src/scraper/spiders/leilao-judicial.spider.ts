@@ -82,12 +82,12 @@ export class LeilaoJudicialSpider {
     const { data } = await axios.get(url, { headers: HEADERS, timeout: 15000 })
     const $ = cheerio.load(data)
 
-    // Título: primeiro h1 ou h2 da página
-    const title = $('h1, h2').first().text().trim()
-    if (!title || title.length < 4) return null
+    // Título: primeiro h1 ou h2
+    const h1Title = $('h1, h2').first().text().trim()
+    if (!h1Title || h1Title.length < 4) return null
 
-    // Preços: textos próximos a "Lance mínimo", "Avaliação", "Lance Atual"
-    const priceText = this.findTextAfterLabel($, ['Lance mínimo', 'Lance Atual', 'Avaliação', 'Valor'])
+    // Preços
+    const priceText    = this.findTextAfterLabel($, ['Lance mínimo', 'Lance Atual', 'Avaliação', 'Valor'])
     const appraisalText = this.findTextAfterLabel($, ['Avaliação', 'Valor de avaliação'])
 
     // Localização
@@ -101,24 +101,35 @@ export class LeilaoJudicialSpider {
     const images = $('img[src*="lote"], img[src*="foto"], img[src*="imagem"]')
       .map((_, el) => $(el).attr('src') ?? '').get().filter(Boolean).slice(0, 5)
 
-    // Descrição
-    const desc = $('[class*="descricao"], [class*="observa"], p').first().text().trim()
+    // Descrição — pode conter o modelo do veículo quando h1 é título genérico do tribunal
+    const descEl  = $('[class*="descricao"], [class*="observa"], [class*="bem"], [class*="detalhe"], p')
+    const descText = descEl.map((_, el) => $(el).text().trim()).get().join(' ').replace(/\s+/g, ' ')
 
-    const sourceId = url.split('/').filter(Boolean).slice(-2).join('-')
-    const price    = this.parsePrice(priceText)
+    // Verifica veículo no h1 ou em qualquer texto relevante da página
+    const fullText = `${h1Title} ${descText}`.toLowerCase()
+    const category = this.refineCategory(categoryFromList, fullText)
+    if (category !== 'VEICULO') return null
+
+    // Usa h1 como título; se h1 for genérico (sem keyword), tenta linha da descrição com keyword
+    let title = h1Title
+    if (!this.VEHICLE_KW.some(k => h1Title.toLowerCase().includes(k))) {
+      const betterLine = descText.split(/[.\n]/).find(l =>
+        this.VEHICLE_KW.some(k => l.toLowerCase().includes(k))
+      )
+      if (betterLine) title = betterLine.trim().slice(0, 200)
+    }
+
+    const sourceId       = url.split('/').filter(Boolean).slice(-2).join('-')
+    const price          = this.parsePrice(priceText)
     const appraisedValue = this.parsePrice(appraisalText)
     const { city, state } = this.parseLocation(location)
-    // Usa a categoria da página de origem como base; refina pelo título se necessário
-    const category = this.refineCategory(categoryFromList, title)
-    // Rejeita lotes sem palavra-chave de veículo — provavelmente imóveis mal categorizados
-    if (category !== 'VEICULO') return null
 
     return {
       sourceId,
       sourceName:  'leilao_judicial',
       sourceUrl:   url,
       title:       title.slice(0, 200),
-      description: desc || null,
+      description: descText.slice(0, 500) || null,
       category,
       auctionType: 'JUDICIAL' as AuctionType,
       status:      'ACTIVE' as AuctionStatus,
